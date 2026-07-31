@@ -1002,6 +1002,32 @@ svg.leaflet-image-layer.leaflet-interactive path {
     .hint { margin-top: 4px; font-size: 10.5px; line-height: 1.35; color: var(--muted); }
     .hint[hidden] { display: none; }
 
+    /* ---------- occasions (repeat visits to one waypoint) ---------- */
+    .occasions { display: grid; gap: 6px; }
+    .occasion {
+      padding: 5px 7px 7px;
+      border: 1px solid var(--border);
+      border-radius: 11px;
+      background: var(--panel-2);
+    }
+    .occasion-head { display: flex; align-items: center; justify-content: space-between; min-height: 30px; }
+    .occasion-num { font-size: 10px; font-weight: 800; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+    .occasion .row2 { gap: 5px; }
+    .occasion .field { margin-bottom: 0; min-width: 0; }
+    .occasion label { font-size: 9.5px; }
+    .occasion input { min-height: 38px; background: var(--panel); }
+    .occasion .mini { width: 32px; height: 32px; font-size: 14px; }
+    .occasion .mini[hidden] { display: none; }
+    .btn.add-occasion {
+      width: 100%;
+      margin-top: 6px;
+      min-height: 40px;
+      font-size: 13px;
+      color: var(--accent);
+      border-style: dashed;
+      background: transparent;
+    }
+
     .modal-map { height: 150px; border: 1px solid var(--border); border-radius: 11px; overflow: hidden; margin-bottom: 7px; background: #dcdce1; }
 
     .track-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-bottom: 10px; }
@@ -1030,7 +1056,11 @@ svg.leaflet-image-layer.leaflet-interactive path {
       padding: 8px 0 4px;
       background: var(--panel);
     }
-    .form-actions .btn { min-height: 46px; padding: 0 6px; }
+    .form-actions .btn { min-height: 46px; padding: 0 4px; }
+    /* the waypoint sheet carries a fourth action (Maps) */
+    #waypointForm .form-actions { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    #waypointForm .form-actions .btn { font-size: 14px; }
+    .btn.with-icon { display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
 
     /* ---------- toast ---------- */
     .toast {
@@ -1142,15 +1172,11 @@ svg.leaflet-image-layer.leaflet-interactive path {
           <textarea id="note" maxlength="1000" placeholder="Optionele notitie"></textarea>
         </div>
 
-        <div class="row2">
-          <div class="field">
-            <label for="startAt">Start</label>
-            <input id="startAt" type="datetime-local" required />
-          </div>
-          <div class="field">
-            <label for="endAt">Einde</label>
-            <input id="endAt" type="datetime-local" />
-          </div>
+        <div class="field">
+          <label>Bezoeken</label>
+          <div id="occasions" class="occasions"></div>
+          <button id="addOccasionBtn" class="btn add-occasion" type="button">+ Bezoek toevoegen</button>
+          <div class="hint">Eén waypoint, meerdere bezoeken: voeg per bezoek een start- en eindmoment toe.</div>
         </div>
 
         <div class="field">
@@ -1184,6 +1210,11 @@ svg.leaflet-image-layer.leaflet-interactive path {
         <div class="form-actions">
           <button id="cancelBtn" class="btn" type="button">Annuleer</button>
           <button id="waypointShareBtnBottom" class="btn" type="button">&#8599; Deel</button>
+          <button id="waypointMapsBtn" class="btn with-icon" type="button" aria-label="Open deze positie in Google Maps">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 10c0 6-9 12-9 12s-9-6-9-12a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>
+            </svg>Maps
+          </button>
           <button class="btn primary" type="submit">Bewaar</button>
         </div>
       </form>
@@ -2006,10 +2037,10 @@ exports.OpenLocationCode = OpenLocationCode;
       const els = {};
       for (const id of [
         'items', 'count', 'modal', 'waypointForm', 'modalTitle', 'id', 'title', 'note',
-        'startAt', 'endAt', 'lat', 'lng', 'address', 'addBtn', 'importBtn', 'importFile',
+        'occasions', 'addOccasionBtn', 'lat', 'lng', 'address', 'addBtn', 'importBtn', 'importFile',
         'exportBtn', 'recordBtn', 'refreshBtn', 'modalLocateBtn', 'coordApplyBtn',
         'coordPasteBtn', 'placeSearch', 'placeSearchBtn', 'searchResults', 'searchStatus',
-        'waypointShareBtnBottom', 'trackShareBtn', 'modalMap', 'trackModal', 'trackForm',
+        'waypointShareBtnBottom', 'waypointMapsBtn', 'trackShareBtn', 'modalMap', 'trackModal', 'trackForm',
         'trackModalTitle', 'trackId', 'trackTitle', 'trackNote', 'trackStartAt', 'trackEndAt',
         'trackDistance', 'trackDuration', 'trackPoints', 'trackWarning', 'trackCloseBtn',
         'trackCancelBtn', 'closeBtn', 'cancelBtn', 'resolveBtn', 'toast', 'toastText',
@@ -2266,6 +2297,58 @@ exports.OpenLocationCode = OpenLocationCode;
           : `${minutes}:${String(seconds).padStart(2, '0')}`;
       }
 
+      /* ------------------------------------------------------------------ *
+       * Occasions: one waypoint can be visited on several separate moments.
+       * `occasions` is authoritative; `startAt`/`endAt` stay on the item as a
+       * mirror of the overall span so older exports and v7 keep working.
+       * ------------------------------------------------------------------ */
+      function itemOccasions(item) {
+        const source = Array.isArray(item.occasions) && item.occasions.length
+          ? item.occasions
+          : [{ startAt: item.startAt, endAt: item.endAt }];
+        return source
+          .map(occasion => ({
+            startAt: occasion?.startAt ? String(occasion.startAt) : '',
+            endAt: occasion?.endAt ? String(occasion.endAt) : ''
+          }))
+          .filter(occasion => occasion.startAt);
+      }
+
+      // datetime-local values are fixed-width and zero padded, so a plain
+      // string compare is already chronological.
+      const sortOccasions = (list) =>
+        [...list].sort((a, b) => a.startAt.localeCompare(b.startAt));
+
+      const occasionText = (occasion) => occasion.endAt
+        ? `${formatDateTime(occasion.startAt)} → ${formatDateTime(occasion.endAt)}`
+        : formatDateTime(occasion.startAt);
+
+      function occasionsSummary(item) {
+        const list = sortOccasions(itemOccasions(item));
+        if (!list.length) return '';
+        if (list.length === 1) return occasionText(list[0]);
+        const last = list.at(-1);
+        return `${list.length}× bezocht · ${formatDateTime(list[0].startAt)} → ${formatDateTime(last.endAt || last.startAt)}`;
+      }
+
+      function overlappingOccasions(list) {
+        const sorted = sortOccasions(list);
+        for (let i = 1; i < sorted.length; i++) {
+          if (sorted[i].startAt < (sorted[i - 1].endAt || sorted[i - 1].startAt)) return true;
+        }
+        return false;
+      }
+
+      // The span that older readers see in startAt/endAt.
+      function occasionSpan(list) {
+        const sorted = sortOccasions(list);
+        const last = sorted.at(-1);
+        return {
+          startAt: sorted[0].startAt,
+          endAt: sorted.length === 1 ? sorted[0].endAt : (last.endAt || last.startAt)
+        };
+      }
+
       const validCoords = (lat, lng) =>
         Number.isFinite(lat) && Number.isFinite(lng) &&
         lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
@@ -2424,9 +2507,9 @@ exports.OpenLocationCode = OpenLocationCode;
        * a GPS tick never rebuilds the whole DOM.
        * ------------------------------------------------------------------ */
       function itemSignature(item) {
-        return isTrack(item)
-          ? `t|${item.points.length}|${item.updatedAt || ''}|${item.active ? 1 : 0}`
-          : `w|${item.lat}|${item.lng}|${item.title}|${item.address || ''}|${item.startAt || ''}|${item.endAt || ''}`;
+        if (isTrack(item)) return `t|${item.points.length}|${item.updatedAt || ''}|${item.active ? 1 : 0}`;
+        const occasions = itemOccasions(item).map(o => `${o.startAt}~${o.endAt}`).join(';');
+        return `w|${item.lat}|${item.lng}|${item.title}|${item.address || ''}|${occasions}`;
       }
 
       function listRow(item) {
@@ -2450,9 +2533,7 @@ exports.OpenLocationCode = OpenLocationCode;
             </article>`;
         }
 
-        const timeText = item.endAt
-          ? `${formatDateTime(item.startAt)} → ${formatDateTime(item.endAt)}`
-          : formatDateTime(item.startAt);
+        const timeText = occasionsSummary(item);
         return `
           <article class="item${selected}" data-id="${escapeHtml(item.id)}" data-type="waypoint">
             <div class="item-main" data-action="show">
@@ -2496,8 +2577,10 @@ exports.OpenLocationCode = OpenLocationCode;
 
           if (trackLayers.has(id)) { map.removeLayer(trackLayers.get(id).group); trackLayers.delete(id); }
           const existing = markers.get(id);
+          const visits = sortOccasions(itemOccasions(item));
           const popup = `<strong>${escapeHtml(item.title)}</strong><br>` +
-            (item.startAt ? `${escapeHtml(formatDateTime(item.startAt))}<br>` : '') +
+            visits.slice(0, 3).map(occasion => `${escapeHtml(occasionText(occasion))}<br>`).join('') +
+            (visits.length > 3 ? `<em>+${visits.length - 3} bezoek${visits.length - 3 === 1 ? '' : 'en'}</em><br>` : '') +
             escapeHtml(item.address || `${Number(item.lat).toFixed(5)}, ${Number(item.lng).toFixed(5)}`);
 
           if (existing) {
@@ -2693,9 +2776,62 @@ exports.OpenLocationCode = OpenLocationCode;
       /* ------------------------------------------------------------------ *
        * Waypoint modal
        * ------------------------------------------------------------------ */
+      function occasionRowHtml(occasion, index, total) {
+        return `
+          <div class="occasion" data-occasion>
+            <div class="occasion-head">
+              <span class="occasion-num">Bezoek ${index + 1}</span>
+              <button class="mini delete" type="button" data-action="remove-occasion"
+                aria-label="Bezoek ${index + 1} verwijderen"${total > 1 ? '' : ' hidden'}>×</button>
+            </div>
+            <div class="row2">
+              <div class="field">
+                <label>Start</label>
+                <input type="datetime-local" data-role="start" value="${escapeHtml(occasion.startAt || '')}" aria-label="Start bezoek ${index + 1}" />
+              </div>
+              <div class="field">
+                <label>Einde</label>
+                <input type="datetime-local" data-role="end" value="${escapeHtml(occasion.endAt || '')}" aria-label="Einde bezoek ${index + 1}" />
+              </div>
+            </div>
+          </div>`;
+      }
+
+      function readOccasionRows() {
+        return [...els.occasions.querySelectorAll('[data-occasion]')].map(row => ({
+          startAt: row.querySelector('[data-role="start"]').value,
+          endAt: row.querySelector('[data-role="end"]').value
+        }));
+      }
+
+      // Always renders at least one row, so a waypoint can never end up with
+      // no moment at all.
+      function renderOccasions(list) {
+        const rows = list.length ? list : [{ startAt: localDateTimeValue(), endAt: '' }];
+        els.occasions.innerHTML = rows.map((occasion, index) => occasionRowHtml(occasion, index, rows.length)).join('');
+      }
+
+      els.addOccasionBtn.addEventListener('click', () => {
+        renderOccasions([...readOccasionRows(), { startAt: localDateTimeValue(), endAt: '' }]);
+        const rows = els.occasions.querySelectorAll('[data-occasion] [data-role="start"]');
+        const last = rows[rows.length - 1];
+        last?.scrollIntoView({ block: 'nearest' });
+        last?.focus();
+      });
+
+      els.occasions.addEventListener('click', event => {
+        const button = event.target.closest('[data-action="remove-occasion"]');
+        if (!button) return;
+        const rows = [...els.occasions.querySelectorAll('[data-occasion]')];
+        const index = rows.indexOf(button.closest('[data-occasion]'));
+        const values = readOccasionRows();
+        values.splice(index, 1);
+        renderOccasions(values);
+      });
+
       function serializeWaypointForm() {
         return JSON.stringify([els.id.value, els.title.value, els.note.value,
-          els.startAt.value, els.endAt.value, els.lat.value, els.lng.value, els.address.value]);
+          readOccasionRows(), els.lat.value, els.lng.value, els.address.value]);
       }
 
       function serializeTrackForm() {
@@ -2738,8 +2874,7 @@ exports.OpenLocationCode = OpenLocationCode;
         els.id.value = item?.id || '';
         els.title.value = item?.title || '';
         els.note.value = item?.note || '';
-        els.startAt.value = item?.startAt || localDateTimeValue();
-        els.endAt.value = item?.endAt || '';
+        renderOccasions(item ? sortOccasions(itemOccasions(item)) : []);
         els.address.value = item?.address || '';
         els.modalTitle.textContent = isEdit ? 'Waypoint bewerken' : 'Waypoint toevoegen';
 
@@ -2778,11 +2913,20 @@ exports.OpenLocationCode = OpenLocationCode;
         const { lat, lng } = readCoords();
         if (!validCoords(lat, lng)) { toast('Latitude of longitude is ongeldig.'); return; }
 
-        if (els.endAt.value && new Date(els.endAt.value) < new Date(els.startAt.value)) {
-          toast('Einde moet na de start liggen.');
-          els.endAt.focus();
+        const entered = readOccasionRows().filter(occasion => occasion.startAt || occasion.endAt);
+        if (!entered.length) { toast('Voeg minstens één bezoek toe.'); return; }
+        if (entered.some(occasion => !occasion.startAt)) {
+          toast('Elk bezoek heeft een startmoment nodig.');
           return;
         }
+        if (entered.some(occasion => occasion.endAt && occasion.endAt < occasion.startAt)) {
+          toast('Het einde van een bezoek moet na de start liggen.');
+          return;
+        }
+        const occasions = sortOccasions(entered);
+        if (overlappingOccasions(occasions) &&
+            !confirm('Twee bezoeken overlappen elkaar in tijd. Toch bewaren?')) return;
+        const span = occasionSpan(occasions);
 
         const index = items.findIndex(candidate => String(candidate.id) === els.id.value);
         const previous = index >= 0 ? items[index] : null;
@@ -2791,8 +2935,9 @@ exports.OpenLocationCode = OpenLocationCode;
           type: 'waypoint',
           title: els.title.value.trim(),
           note: els.note.value.trim(),
-          startAt: els.startAt.value,
-          endAt: els.endAt.value,
+          occasions,
+          startAt: span.startAt,
+          endAt: span.endAt,
           lat, lng,
           address: els.address.value.trim(),
           createdAt: previous?.createdAt || new Date().toISOString(),
@@ -2808,7 +2953,8 @@ exports.OpenLocationCode = OpenLocationCode;
         selectedItemId = String(item.id);
         render();
         scrollListTo(selectedItemId);
-        toast(index >= 0 ? 'Waypoint bijgewerkt.' : 'Waypoint bewaard.');
+        const visits = occasions.length > 1 ? ` (${occasions.length} bezoeken)` : '';
+        toast((index >= 0 ? 'Waypoint bijgewerkt' : 'Waypoint bewaard') + visits + '.');
       });
 
       els.closeBtn.addEventListener('click', () => closeModal());
@@ -3298,10 +3444,17 @@ exports.OpenLocationCode = OpenLocationCode;
 
       function waypointShareText() {
         const { lat, lng } = readCoords();
+        const visits = sortOccasions(readOccasionRows().filter(occasion => occasion.startAt));
+        const visitLines = visits.length > 1
+          ? ['Bezoeken:', ...visits.map((occasion, index) => `${index + 1}. ${occasionText(occasion)}`)]
+          : visits.map(occasion => [
+              `Start: ${formatDateTime(occasion.startAt)}`,
+              occasion.endAt ? `Einde: ${formatDateTime(occasion.endAt)}` : ''
+            ].filter(Boolean).join('\n'));
+
         return [
           els.title.value.trim() || 'Waypoint',
-          els.startAt.value ? `Start: ${formatDateTime(els.startAt.value)}` : '',
-          els.endAt.value ? `Einde: ${formatDateTime(els.endAt.value)}` : '',
+          ...visitLines,
           els.address.value.trim(),
           els.note.value.trim(),
           validCoords(lat, lng) ? `Google Maps: ${googleMapsUrl(lat, lng)}` : ''
@@ -3325,6 +3478,24 @@ exports.OpenLocationCode = OpenLocationCode;
           last ? `Eindkaart: ${googleMapsUrl(last.lat, last.lng)}` : ''
         ].filter(Boolean).join('\n');
       }
+
+      // Google's documented Maps URL scheme: on iOS this hands off to the
+      // Google Maps app when it is installed, otherwise it opens the web map.
+      els.waypointMapsBtn.addEventListener('click', () => {
+        const { lat, lng } = readCoords();
+        if (!validCoords(lat, lng)) { toast('Voer eerst geldige coördinaten in.'); return; }
+        const url = `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+        if (window.open(url, '_blank', 'noopener')) return;
+        // Standalone home-screen apps can block window.open; a synthetic link
+        // still opens Safari and leaves this app running in the background.
+        const link = document.createElement('a');
+        link.href = url;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      });
 
       els.waypointShareBtnBottom.addEventListener('click', () =>
         shareText(els.title.value.trim() || 'Waypoint', waypointShareText()));
@@ -3590,13 +3761,23 @@ exports.OpenLocationCode = OpenLocationCode;
         const lat = Number(raw.lat);
         const lng = Number(raw.lng);
         if (!validCoords(lat, lng)) throw new Error(`Item ${index + 1} heeft ongeldige coördinaten.`);
+
+        // occasions wins when present; a v7 file only has startAt/endAt and
+        // becomes a single occasion.
+        let occasions = sortOccasions(itemOccasions({ ...raw, startAt, endAt }));
+        if (!occasions.length) occasions = [{ startAt, endAt }];
+        const bad = occasions.find(occasion => occasion.endAt && occasion.endAt < occasion.startAt);
+        if (bad) throw new Error(`Item ${index + 1} heeft een bezoek dat eindigt voor het begint.`);
+        const span = occasionSpan(occasions);
+
         return {
           id: String(raw.id || uuid()),
           type: 'waypoint',
           title,
           note: String(raw.note || ''),
-          startAt,
-          endAt,
+          occasions,
+          startAt: span.startAt,
+          endAt: span.endAt,
           lat, lng,
           address: String(raw.address || ''),
           createdAt: raw.createdAt ? String(raw.createdAt) : new Date().toISOString(),
