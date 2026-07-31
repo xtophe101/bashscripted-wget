@@ -993,14 +993,55 @@ svg.leaflet-image-layer.leaflet-interactive path {
     .choose-options .btn.primary small { color: rgba(255,255,255,.88); }
 
     /* ---------- map markers ---------- */
-    .wp-pin { background: transparent; border: 0; }
+    .wp-marker { background: transparent; border: 0; }
+    /* while a selection is active, everything outside it steps back */
+    .wp-marker.dim { opacity: .32; }
+
     .wp-pin svg { display: block; filter: drop-shadow(0 2px 3px rgba(0,0,0,.35)); }
     .wp-pin svg path { fill: var(--accent); stroke: #fff; stroke-width: 1.4; }
     .wp-pin svg circle { fill: #fff; }
     .wp-pin.sel svg { filter: drop-shadow(0 0 6px rgba(255,149,0,.95)); transform: scale(1.18); transform-origin: 50% 100%; }
     .wp-pin.sel svg path { fill: var(--warn); }
-    /* while a selection is active, everything outside it steps back */
-    .wp-pin.dim { opacity: .32; }
+
+    /* zoomed out, position is all that matters */
+    .wp-dot i {
+      display: block;
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid #fff;
+      box-shadow: 0 1px 3px rgba(0,0,0,.45);
+    }
+    .wp-dot.sel i { background: var(--warn); box-shadow: 0 0 7px rgba(255,149,0,.95); transform: scale(1.35); }
+
+    /* a title starting with an emoji carries it as the marker */
+    .wp-emoji .chip {
+      position: relative;
+      display: grid;
+      place-items: center;
+      border-radius: 999px;
+      background: #fff;
+      border: 2px solid var(--accent);
+      box-shadow: 0 2px 4px rgba(0,0,0,.35);
+      line-height: 1;
+      white-space: nowrap;
+    }
+    .wp-emoji .chip::after {
+      content: "";
+      position: absolute;
+      bottom: -8px;
+      left: 50%;
+      transform: translateX(-50%);
+      border: 5px solid transparent;
+      border-top-color: var(--accent);
+    }
+    .wp-emoji.sel .chip {
+      border-color: var(--warn);
+      box-shadow: 0 0 7px rgba(255,149,0,.95);
+      transform: scale(1.15);
+    }
+    .wp-emoji.sel .chip::after { border-top-color: var(--warn); }
 
     /* ---------- modals ---------- */
     .modal {
@@ -1211,7 +1252,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <body>
   <main class="app">
     <nav class="toolbar" aria-label="Kaartacties">
-      <input id="importFile" type="file" accept="application/json,.json" hidden />
+      <input id="importFile" type="file" accept=".json,.gpx,application/json,application/gpx+xml,application/xml,text/xml" hidden />
       <button id="refreshBtn" class="btn icon" aria-label="Ververs app" title="Ververs app">&#8635;</button>
       <button id="importBtn" class="btn icon" aria-label="Importeer JSON" title="Importeer JSON">&#128229;</button>
       <button id="exportBtn" class="btn icon" aria-label="Exporteer JSON" title="Exporteer JSON">&#128228;</button>
@@ -2693,17 +2734,125 @@ exports.OpenLocationCode = OpenLocationCode;
 
       const trackRenderer = L.canvas({ tolerance: 12, padding: 0.4 });
 
-      const PIN_SVG =
-        '<svg viewBox="0 0 26 34" width="26" height="34" aria-hidden="true">' +
+      const TRACK_STYLE = { color: '#0a84ff', weight: 5, opacity: .85, renderer: trackRenderer };
+      const ACTIVE_TRACK_STYLE = { color: '#ff3b30', weight: 6, opacity: .95, renderer: trackRenderer };
+
+      const pinSvg = (w, h) =>
+        `<svg viewBox="0 0 26 34" width="${w}" height="${h}" aria-hidden="true">` +
         '<path d="M13 33S24 20.8 24 13A11 11 0 1 0 2 13c0 7.8 11 20 11 20z"/>' +
         '<circle cx="13" cy="12.6" r="4.2"/></svg>';
-      const pinIcon = L.divIcon({
-        html: PIN_SVG,
-        className: 'wp-pin',
-        iconSize: [26, 34],
-        iconAnchor: [13, 34],
-        popupAnchor: [0, -30]
-      });
+
+      /* ------------------------------------------------------------------ *
+       * Marker scale by zoom
+       *
+       * At country scale a field of full-size pins collapses into one blob,
+       * so markers step down to plain dots. Thresholds are chosen around what
+       * the zoom level means: street/town detail keeps the full pin, regional
+       * views get a compact pin, and from country scale down only position
+       * matters, so a dot carries it.
+       * ------------------------------------------------------------------ */
+      const MARKER_TIERS = [
+        { minZoom: 14, kind: 'pin', size: [26, 34], emoji: 19 },  // street & town
+        { minZoom: 11, kind: 'pin', size: [21, 28], emoji: 15 },  // city & region
+        { minZoom: 8,  kind: 'dot', size: 11 },                   // province
+        { minZoom: 5,  kind: 'dot', size: 8 },                    // country
+        { minZoom: 0,  kind: 'dot', size: 6 }                     // continent & world
+      ];
+      const TRACK_WEIGHTS = [
+        { minZoom: 15, weight: 6 },
+        { minZoom: 12, weight: 5 },
+        { minZoom: 9, weight: 4 },
+        { minZoom: 6, weight: 3 },
+        { minZoom: 0, weight: 2 }
+      ];
+
+      const tierFor = (zoom) => MARKER_TIERS.find(tier => zoom >= tier.minZoom) || MARKER_TIERS.at(-1);
+      const weightFor = (zoom) => (TRACK_WEIGHTS.find(step => zoom >= step.minZoom) || TRACK_WEIGHTS.at(-1)).weight;
+
+      let markerTier = tierFor(map.getZoom());
+      let trackWeight = weightFor(map.getZoom());
+      const trackScale = () => trackWeight / TRACK_STYLE.weight;
+
+      // A title that opens with an emoji says more than a generic pin, so the
+      // emoji becomes the marker. Grapheme segmentation keeps flags and other
+      // multi-codepoint sequences intact; the regex is the fallback.
+      const EMOJI_RE = /^(?:\p{Regional_Indicator}\p{Regional_Indicator}|\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic}|\p{Emoji_Modifier})*)/u;
+      const segmenter = typeof Intl !== 'undefined' && Intl.Segmenter
+        ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+        : null;
+
+      // Returns the leading emoji plus how many glyphs it is, so a pair such
+      // as a border crossing's two flags gets a wider badge instead of being
+      // clipped by a circle sized for one.
+      function leadingEmoji(title) {
+        const text = String(title || '').trim();
+        if (!text) return { emoji: '', units: 0 };
+        if (segmenter) {
+          let found = '';
+          let units = 0;
+          for (const { segment } of segmenter.segment(text)) {
+            if (!EMOJI_RE.test(segment) || units >= 2) break;
+            found += segment;
+            units++;
+          }
+          return { emoji: found, units };
+        }
+        const match = text.match(EMOJI_RE);
+        return match ? { emoji: match[0], units: 1 } : { emoji: '', units: 0 };
+      }
+
+      function iconFor(item, tier = markerTier) {
+        const { emoji, units } = leadingEmoji(item.title);
+        if (tier.kind === 'dot') {
+          const size = tier.size;
+          return L.divIcon({
+            html: '<i></i>',
+            className: 'wp-marker wp-dot',
+            iconSize: [size, size],
+            iconAnchor: [size / 2, size / 2],
+            popupAnchor: [0, -size / 2 - 2]
+          });
+        }
+        const [w, h] = tier.size;
+        if (emoji) {
+          const chip = Math.round(tier.emoji * 1.75);
+          const width = units > 1 ? Math.round(chip * 1.5) : chip;
+          return L.divIcon({
+            html: `<span class="chip" style="width:${width}px;height:${chip}px;font-size:${tier.emoji}px">${escapeHtml(emoji)}</span>`,
+            className: 'wp-marker wp-emoji',
+            iconSize: [width, chip + 7],
+            iconAnchor: [width / 2, chip + 7],
+            popupAnchor: [0, -chip - 4]
+          });
+        }
+        return L.divIcon({
+          html: pinSvg(w, h),
+          className: 'wp-marker wp-pin',
+          iconSize: [w, h],
+          iconAnchor: [w / 2, h],
+          popupAnchor: [0, -h + 4]
+        });
+      }
+
+      function applyZoomScale() {
+        const zoom = map.getZoom();
+        const tier = tierFor(zoom);
+        const weight = weightFor(zoom);
+        if (tier === markerTier && weight === trackWeight) return;
+        markerTier = tier;
+        trackWeight = weight;
+
+        markers.forEach((entry, id) => {
+          const item = findItem(id);
+          if (item) entry.marker.setIcon(iconFor(item, tier));
+        });
+        trackLayers.forEach(entry => entry.group.eachLayer(layer =>
+          layer.setStyle && layer.setStyle({ weight })));
+        if (activeTrackLayer) activeTrackLayer.eachLayer(layer =>
+          layer.setStyle && layer.setStyle({ weight: Math.max(2, weight + 1) }));
+        groupLines.forEach(entry => entry.line.setStyle({ weight: Math.max(1, Math.round(weight * 0.4)) }));
+        applySelectionStyles();   // setIcon replaces the element, so restyle
+      }
 
       // Marker graphics rise above their coordinate, and the toolbar floats over
       // the top of the map, so framing is padded in pixels rather than degrees.
@@ -2724,8 +2873,6 @@ exports.OpenLocationCode = OpenLocationCode;
         return { paddingTopLeft: [30, top], paddingBottomRight: [30, 24] };
       }
 
-      const TRACK_STYLE = { color: '#0a84ff', weight: 5, opacity: .85, renderer: trackRenderer };
-      const ACTIVE_TRACK_STYLE = { color: '#ff3b30', weight: 6, opacity: .95, renderer: trackRenderer };
 
       function pauseAutoFollow(milliseconds = 30000) {
         autoFollowPausedUntil = Math.max(autoFollowPausedUntil, Date.now() + milliseconds);
@@ -2772,11 +2919,14 @@ exports.OpenLocationCode = OpenLocationCode;
           (stats.gaps ? ` · ${stats.gaps} onderbreking${stats.gaps === 1 ? '' : 'en'}` : '');
       }
 
+      const scaledWeight = (style) => Math.max(1, Math.round(style.weight * trackScale()));
+
       function buildTrackGroup(track, style) {
         const group = L.featureGroup();
+        const weight = scaledWeight(style);
         splitTrackSegments(track).forEach(segment => {
-          if (segment.length > 1) L.polyline(segment, { ...style }).addTo(group);
-          else L.circleMarker(segment[0], { ...style, radius: 5, fillOpacity: .9 }).addTo(group);
+          if (segment.length > 1) L.polyline(segment, { ...style, weight }).addTo(group);
+          else L.circleMarker(segment[0], { ...style, weight, radius: Math.max(2, weight), fillOpacity: .9 }).addTo(group);
         });
         group.on('click', event => {
           // Pass the Leaflet event, not the DOM event: only this form sets the
@@ -2948,7 +3098,7 @@ exports.OpenLocationCode = OpenLocationCode;
             continue;
           }
 
-          const marker = L.marker([item.lat, item.lng], { icon: pinIcon, riseOnHover: true })
+          const marker = L.marker([item.lat, item.lng], { icon: iconFor(item), riseOnHover: true })
             .addTo(map)
             .bindPopup(popup);
           marker.on('click', () => selectItem(id, { fromMap: true }));
@@ -2989,7 +3139,7 @@ exports.OpenLocationCode = OpenLocationCode;
           if (existing) map.removeLayer(existing.line);
           const line = L.polyline(points, {
             color: groupColor(name),
-            weight: 2,
+            weight: Math.max(1, Math.round(2 * trackScale())),
             opacity: .75,
             dashArray: '2 7',
             interactive: false,
@@ -3062,8 +3212,8 @@ exports.OpenLocationCode = OpenLocationCode;
         });
 
         const restyle = (group, style, on) => group?.eachLayer(layer => layer.setStyle && layer.setStyle(
-          on ? { weight: Math.max(9, style.weight + 3), opacity: 1, color: '#ff9500' }
-             : { weight: style.weight, opacity: active ? style.opacity * .35 : style.opacity, color: style.color }));
+          on ? { weight: scaledWeight(style) + 4, opacity: 1, color: '#ff9500' }
+             : { weight: scaledWeight(style), opacity: active ? style.opacity * .35 : style.opacity, color: style.color }));
         trackLayers.forEach((entry, id) => restyle(entry.group, TRACK_STYLE, isSelected(id)));
         if (activeTrack) restyle(activeTrackLayer, ACTIVE_TRACK_STYLE, isSelected(activeTrack.id));
 
@@ -3393,7 +3543,7 @@ exports.OpenLocationCode = OpenLocationCode;
       function createDraftMarker(lat, lng) {
         ensureModalMap(lat, lng);
         if (modalMapMarker) modalMap.removeLayer(modalMapMarker);
-        modalMapMarker = L.marker([lat, lng], { draggable: true, icon: pinIcon }).addTo(modalMap);
+        modalMapMarker = L.marker([lat, lng], { draggable: true, icon: iconFor({ title: '' }, MARKER_TIERS[0]) }).addTo(modalMap);
         modalMapMarker.on('dragstart', () => pauseAutoFollow(60000));
         modalMapMarker.on('dragend', async () => {
           const pos = modalMapMarker.getLatLng();
@@ -4133,8 +4283,11 @@ exports.OpenLocationCode = OpenLocationCode;
         Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)) *
         Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
 
-      const pinObstacles = (anchors) =>
-        anchors.map(point => ({ x: point.x - 16, y: point.y - 46, w: 32, h: 48 }));
+      const pinObstacles = (anchors, widths = []) =>
+        anchors.map((point, index) => {
+          const half = Math.max(16, (widths[index] || 0) / 2 + 2);
+          return { x: point.x - half, y: point.y - 46, w: half * 2, h: 48 };
+        });
 
       function labelCandidates(anchor, w, h) {
         return [
@@ -4305,7 +4458,46 @@ exports.OpenLocationCode = OpenLocationCode;
         const anchors = waypoints.map(item => project(item.lat, item.lng));
 
         // Pins first, so no label can be hidden underneath one.
+        const badgeWidths = [];
         anchors.forEach((point, index) => {
+          const { emoji } = leadingEmoji(waypoints[index].title);
+          if (emoji) {
+            // Emoji chip with the sequence number as a small badge, so the
+            // image still matches the numbered list in the shared text.
+            ctx.font = '22px -apple-system, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif';
+            const glyph = Math.ceil(ctx.measureText(emoji).width);
+            const half = Math.max(17, glyph / 2 + 7);
+            badgeWidths[index] = half * 2;   // label placement must clear it
+            ctx.beginPath();
+            if (ctx.roundRect) ctx.roundRect(point.x - half, point.y - 37, half * 2, 34, 17);
+            else ctx.arc(point.x, point.y - 20, 17, 0, Math.PI * 2);
+            ctx.fillStyle = '#ffffff';
+            ctx.fill();
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = '#0a84ff';
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(point.x, point.y);
+            ctx.lineTo(point.x - 6, point.y - 12);
+            ctx.lineTo(point.x + 6, point.y - 12);
+            ctx.closePath();
+            ctx.fillStyle = '#0a84ff';
+            ctx.fill();
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(emoji, point.x, point.y - 19);
+            ctx.beginPath();
+            ctx.arc(point.x + half - 3, point.y - 34, 9, 0, Math.PI * 2);
+            ctx.fillStyle = '#0a84ff';
+            ctx.fill();
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 12px -apple-system, system-ui, sans-serif';
+            ctx.fillText(String(index + 1), point.x + half - 3, point.y - 33);
+            return;
+          }
           // Two passes: a white silhouette first, then the blue body on top.
           // Stroking the two subpaths directly would draw an outline straight
           // across the seam where the head meets the stem.
@@ -4353,7 +4545,7 @@ exports.OpenLocationCode = OpenLocationCode;
           };
         });
 
-        const placements = layoutLabels(boxes, pinObstacles(anchors), { x: 4, y: 4, w: size - 8, h: size - 34 });
+        const placements = layoutLabels(boxes, pinObstacles(anchors, badgeWidths), { x: 4, y: 4, w: size - 8, h: size - 34 });
 
         placements.forEach((place, index) => {
           if (!place) return;   // no readable slot: the numbered pin still identifies it
@@ -4789,20 +4981,123 @@ exports.OpenLocationCode = OpenLocationCode;
         };
       }
 
+      /* ------------------------------------------------------------------ *
+       * GPX
+       *
+       * <wpt> becomes a waypoint, each <trk> a track with one segment per
+       * <trkseg>, and a <rte> is treated as a track as well. Everything is
+       * shaped into the same raw form the JSON importer already validates.
+       * ------------------------------------------------------------------ */
+      function gpxText(node, tag) {
+        const found = node.getElementsByTagName(tag)[0];
+        return found ? String(found.textContent || '').trim() : '';
+      }
+
+      function gpxPoint(node) {
+        const lat = Number(node.getAttribute('lat'));
+        const lng = Number(node.getAttribute('lon'));
+        if (!validCoords(lat, lng)) return null;
+        const time = gpxText(node, 'time');
+        const elevation = gpxText(node, 'ele');
+        return {
+          lat, lng,
+          time: time || new Date().toISOString(),
+          altitude: elevation ? Number(elevation) : null,
+          accuracy: null, speed: null, heading: null,
+          breakBefore: false
+        };
+      }
+
+      function parseGpx(text, fileName) {
+        const doc = new DOMParser().parseFromString(text, 'application/xml');
+        if (doc.getElementsByTagName('parsererror').length) throw new Error('Dit GPX-bestand kon niet gelezen worden.');
+        const root = doc.documentElement;
+        if (!root || root.nodeName.toLowerCase() !== 'gpx') throw new Error('Dit is geen GPX-bestand.');
+
+        const metadata = root.getElementsByTagName('metadata')[0];
+        const groupName = (metadata && gpxText(metadata, 'name')) ||
+          String(fileName || '').replace(/\.gpx$/i, '').trim();
+        const raw = [];
+
+        for (const node of root.getElementsByTagName('wpt')) {
+          const point = gpxPoint(node);
+          if (!point) continue;
+          const when = localDateTimeValue(new Date(point.time));
+          raw.push({
+            type: 'waypoint',
+            title: gpxText(node, 'name') || 'GPX-waypoint',
+            note: gpxText(node, 'desc') || gpxText(node, 'cmt') || '',
+            category: (gpxText(node, 'type') || gpxText(node, 'sym') || '').toLowerCase(),
+            group: groupName,
+            lat: point.lat, lng: point.lng,
+            occasions: [{ startAt: when, endAt: '' }],
+            startAt: when, endAt: '',
+            address: ''
+          });
+        }
+
+        const trackNodes = [...root.getElementsByTagName('trk'), ...root.getElementsByTagName('rte')];
+        for (const node of trackNodes) {
+          const points = [];
+          const segments = node.getElementsByTagName('trkseg');
+          if (segments.length) {
+            for (const segment of segments) {
+              let first = true;
+              for (const pointNode of segment.getElementsByTagName('trkpt')) {
+                const point = gpxPoint(pointNode);
+                if (!point) continue;
+                // A new <trkseg> is exactly the gap this app already models.
+                point.breakBefore = first && points.length > 0;
+                first = false;
+                points.push(point);
+              }
+            }
+          } else {
+            for (const pointNode of node.getElementsByTagName('rtept')) {
+              const point = gpxPoint(pointNode);
+              if (point) points.push(point);
+            }
+          }
+          if (!points.length) continue;
+          raw.push({
+            type: 'track',
+            title: gpxText(node, 'name') || groupName || 'GPX-track',
+            note: gpxText(node, 'desc') || gpxText(node, 'cmt') || '',
+            category: '',
+            group: groupName,
+            points,
+            startAt: localDateTimeValue(new Date(points[0].time)),
+            endAt: localDateTimeValue(new Date(points.at(-1).time))
+          });
+        }
+
+        if (!raw.length) throw new Error('Dit GPX-bestand bevat geen waypoints, tracks of routes.');
+        return raw;
+      }
+
+      const isGpxFile = (file, text) =>
+        /\.gpx$/i.test(file.name || '') || /^\s*(<\?xml[^>]*\?>\s*)?<gpx[\s>]/i.test(text);
+
       async function importJsonFile(file) {
         if (!file) return;
         try {
-          const parsed = JSON.parse(await file.text());
-          const source = Array.isArray(parsed) ? parsed : parsed?.items;
-          if (!Array.isArray(source)) {
-            throw new Error('Het JSON-bestand moet een export-object of een lijst met waypoints/tracks zijn.');
+          const text = await file.text();
+          let source;
+          let exportedActive = [];
+
+          if (isGpxFile(file, text)) {
+            source = parseGpx(text, file.name);
+          } else {
+            const parsed = JSON.parse(text);
+            source = Array.isArray(parsed) ? parsed : parsed?.items;
+            if (!Array.isArray(source)) {
+              throw new Error('Het bestand moet een JSON-export, een lijst met waypoints/tracks of een GPX-bestand zijn.');
+            }
+            // A recording that was still running when the file was exported is
+            // imported as a finished track instead of being silently dropped.
+            exportedActive = validTrackSnapshot(parsed?.activeTrack) ? [parsed.activeTrack] : [];
           }
 
-          // A recording that was still running when the file was exported is
-          // imported as a finished track instead of being silently dropped.
-          const exportedActive = !Array.isArray(parsed) && validTrackSnapshot(parsed?.activeTrack)
-            ? [parsed.activeTrack]
-            : [];
           const imported = [...source, ...exportedActive].map(normalizeImportedItem);
           if (!imported.length) { toast('Dit bestand bevat geen items.'); return; }
 
@@ -5043,6 +5338,8 @@ exports.OpenLocationCode = OpenLocationCode;
         els.grabber.addEventListener('pointerup', finish);
         els.grabber.addEventListener('pointercancel', finish);
       }
+
+      map.on('zoomend', applyZoomScale);
 
       window.addEventListener('resize', () => map.invalidateSize());
       window.addEventListener('orientationchange', () => setTimeout(() => map.invalidateSize(), 250));
