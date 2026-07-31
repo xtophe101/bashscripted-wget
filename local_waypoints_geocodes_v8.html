@@ -9,7 +9,11 @@
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Waypoints" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-  <meta name="referrer" content="no-referrer" />
+  <!-- Nominatim identifies callers by Referer (a browser cannot set User-Agent),
+       so send the origin cross-origin. no-referrer gets the fallback geocoder
+       rate-limited or blocked. -->
+  <meta name="referrer" content="strict-origin-when-cross-origin" />
+  <link rel="apple-touch-icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAALQAAAC0CAIAAACyr5FlAAAEIUlEQVR42u3d623UQBgFUP/ePuiDQuiDBqggDVBBKqCB0AAV0AAVLBMFIZD2kdjjiee7x7o/kMhLm5PxnfHYu5y+nEUuZvESCBwCh8AhcAgcAofAIXAIHAKHCBwCh8AhcAgcAofAIXAIHAKHCBwCh8AhcAgcAofAIXAIHAKHCBwCh8AhcAgcAscR8vHr+dPjc9o/vBq5OD48PCN4/PGc28fLx7QPbp8CR/Gx4eHp/PPXed3RPrF9etS4EoHj87f1Ji4qaV8QDiyiiSxYIBKEo5XH7z/PI4/27Uo21mo42szivY72reE4bu5OTfc+2g8ABxkRPpYaJWNA93xTS61RQSrgOJSMvz7gcDapfH5ZyOCjII53nLWGzG+XeUvoLMe85XRWHIPXQDeun8Ix9LrJXMek118Wc1cz2zo4phs25h08FsOGwaMIjp2GjZe9ov/G4DEfjr7DRkNwY09o+6++SqYbPGbC0X5bHaeXr9wq3D6s47R5rv3JM+F4eOrzG2pfZ6JvDce4c8rq9ewuq/VznVmmwdFlvXzjH26X8WOi1fRpcGz/w+2yjL29f0x0KW4aHNsnDl3K4PZSPNF1/BQcHX8lx/lJ4PiT48whtw8ecBwLR+EfBo5jjeQbzyxwHGht9Gg4ZlknXRLmsUfDMctsFg44nFacVhRShRQOU1k4LILBYfkcDhfe4HDJ3iV7m31s9rFN0DZBG4xtMHZrglsT3NTkpia3Q7odEg43UsPhEQxw5A0eHt5i8Cg1bJw8MG7A0WXZHo7Rq+ljDo+anPJS3IDDQ2onvo6/6+Hx1nzUlHHylhrmrsVxeDMeOOY4v3gbLz7qyzh561Cz1iAc77W4XvJ9qWu+Xfn4o+TLWBNHry2fJXeGpuPouNu03s7QdBwjL9vOe9E1F8ewWlqyihbHMayWFn4BK+MYsCZWbNUrCMeAWlq1itbHsfcF2xqXXnNx7FpLC1fRCBy7bjWtcV0+F8d+tbR2FU3BsVMtrV1FU3DsUUvLV9EgHN1rafkqGoSjey0tX0WDcPStpQlVNAtHx1qaUEWzcPSqpSFVNA5Hl1oaUkXjcHSppSFVNA7HKemZ9nCMrqU5VTQRx5ZaGlVFQ3GsrqVRVTQUx+paGlVFQ3Gsq6VpVTQXx4pamlZFc3G8tZYGVtFoHG+6mbbqrbBwdKilgVU0Gsfp1TfTtg+LfYlycbzyGUD1ntcDR59aGltF4bhfS2OrKBz3a2lsFYXjTi1NrqJw3KmlyVUUjlu1NLyKwnGrloZXUThu1dLwKgrH1VqqisJxtZaqonBcrqWqKBxXa6kqCsfVWqqKwnG5lqqicFytpaooHAKHwCFwCBwCh8AhcAgcAocIHAKHwCFwCBwCh8AhcAgcAofAIQKHwCFwCBwCh8AhcAgcAofAIfJffgPLukNtw5HnqAAAAABJRU5ErkJggg==" />
   <title>Local Waypoints v8</title>
 
   <style>/* Leaflet 1.9.4 - BSD-2-Clause - (c) Vladimir Agafonkin, CloudMade. Bundled offline. */
@@ -3849,9 +3853,17 @@ exports.OpenLocationCode = OpenLocationCode;
       /* ------------------------------------------------------------------ *
        * Boot
        * ------------------------------------------------------------------ */
+      // Best effort: ask the browser not to evict this origin's storage under
+      // disk pressure. Chrome and Firefox honour it; Safari ignores it, where
+      // adding the page to the home screen is what keeps storage durable.
+      function requestPersistentStorage() {
+        try { void navigator.storage?.persist?.(); } catch {}
+      }
+
       async function initializeApp() {
         items = loadItems();
         activeTrack = loadActiveTrack();
+        requestPersistentStorage();
 
         installSplitter();
         installMapInteractionGuard();
