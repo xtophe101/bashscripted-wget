@@ -888,6 +888,41 @@ svg.leaflet-image-layer.leaflet-interactive path {
       box-shadow: 0 0 0 2px var(--accent-soft);
     }
 
+    /* group headings in the list */
+    .group-head {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin: 9px 2px 5px;
+    }
+    .group-head:first-child { margin-top: 2px; }
+    .group-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--muted); }
+    .group-name {
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .group-count { margin-left: auto; font-size: 10.5px; font-weight: 700; color: var(--muted); flex: none; }
+    .group-rule { flex: 1; height: 1px; background: var(--border); }
+
+    .item-cat {
+      display: inline-block;
+      margin-right: 5px;
+      padding: 1px 6px;
+      border-radius: 6px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 9.5px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .03em;
+      vertical-align: 1px;
+    }
+
     .mini {
       width: 40px;
       height: 40px;
@@ -900,6 +935,24 @@ svg.leaflet-image-layer.leaflet-interactive path {
     }
     .mini:active { transform: scale(.94); }
     .mini.delete { color: var(--danger); }
+    .mini.toggle { display: grid; place-items: center; color: var(--muted); }
+    .mini.toggle .tick { opacity: 0; transition: opacity .12s ease; }
+    .item.selected .mini.toggle { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+    .item.selected .mini.toggle .tick { opacity: 1; }
+
+    /* share/clear only appear while something is selected */
+    .head-actions .btn[hidden] { display: none; }
+    .head-actions .btn.accent { color: var(--accent); border-color: var(--accent); }
+    .count.has-selection { color: var(--accent); }
+
+    .sheet-head-actions { display: flex; gap: 6px; align-items: center; }
+    .btn.icon.danger { color: var(--danger); }
+    .btn.icon.danger[hidden] { display: none; }
+
+    .choose-options { display: grid; gap: 7px; }
+    .choose-options .btn { min-height: 50px; text-align: left; padding: 0 12px; }
+    .choose-options .btn small { display: block; font-weight: 500; font-size: 11px; color: var(--muted); }
+    .choose-options .btn.primary small { color: rgba(255,255,255,.88); }
 
     /* ---------- map markers ---------- */
     .wp-pin { background: transparent; border: 0; }
@@ -908,6 +961,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
     .wp-pin svg circle { fill: #fff; }
     .wp-pin.sel svg { filter: drop-shadow(0 0 6px rgba(255,149,0,.95)); transform: scale(1.18); transform-origin: 50% 100%; }
     .wp-pin.sel svg path { fill: var(--warn); }
+    /* while a selection is active, everything outside it steps back */
+    .wp-pin.dim { opacity: .32; }
 
     /* ---------- modals ---------- */
     .modal {
@@ -1134,6 +1189,16 @@ svg.leaflet-image-layer.leaflet-interactive path {
         <div class="list-head">
           <div id="count" class="count">0 items</div>
           <div class="head-actions">
+            <button id="shareSelBtn" class="btn icon accent" type="button" hidden aria-label="Deel selectie" title="Deel selectie">
+              <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 16V3M12 3 8 7M12 3l4 4M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/>
+              </svg>
+            </button>
+            <button id="clearSelBtn" class="btn icon" type="button" hidden aria-label="Selectie wissen" title="Selectie wissen">
+              <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                <path d="M6 6l12 12M18 6L6 18"/>
+              </svg>
+            </button>
             <button id="fitBtn" class="btn icon" type="button" aria-label="Toon alles op de kaart" title="Toon alles">
               <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M3 9V4h5M21 9V4h-5M3 15v5h5M21 15v5h-5"/><circle cx="12" cy="12" r="2.5"/>
@@ -1156,7 +1221,14 @@ svg.leaflet-image-layer.leaflet-interactive path {
     <section class="sheet">
       <div class="sheet-head">
         <div id="modalTitle" class="sheet-title">Waypoint</div>
-        <button id="closeBtn" class="btn icon" type="button" aria-label="Sluiten">&times;</button>
+        <div class="sheet-head-actions">
+          <button id="deleteBtn" class="btn icon danger" type="button" hidden aria-label="Waypoint verwijderen" title="Verwijderen">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M4 7h16M10 4h4M6 7l1 13h10l1-13M10 11v6M14 11v6"/>
+            </svg>
+          </button>
+          <button id="closeBtn" class="btn icon" type="button" aria-label="Sluiten">&times;</button>
+        </div>
       </div>
 
       <form id="waypointForm" class="form">
@@ -1166,6 +1238,20 @@ svg.leaflet-image-layer.leaflet-interactive path {
           <label for="title">Titel</label>
           <input id="title" maxlength="100" placeholder="Naam waypoint" required />
         </div>
+
+        <div class="row2">
+          <div class="field">
+            <label for="category">Categorie</label>
+            <input id="category" list="categoryOptions" maxlength="60" placeholder="bv. horeca" />
+            <datalist id="categoryOptions"></datalist>
+          </div>
+          <div class="field">
+            <label for="group">Groep</label>
+            <input id="group" list="groupOptions" maxlength="60" placeholder="bv. Dagtrip Dijon" />
+            <datalist id="groupOptions"></datalist>
+          </div>
+        </div>
+        <div class="hint">Items met dezelfde groep krijgen een kop in de lijst en worden op de kaart met een stippellijn verbonden.</div>
 
         <div class="field">
           <label for="note">Notitie</label>
@@ -1225,7 +1311,14 @@ svg.leaflet-image-layer.leaflet-interactive path {
     <section class="sheet">
       <div class="sheet-head">
         <div id="trackModalTitle" class="sheet-title">Track</div>
-        <button id="trackCloseBtn" class="btn icon" type="button" aria-label="Sluiten">&times;</button>
+        <div class="sheet-head-actions">
+          <button id="trackDeleteBtn" class="btn icon danger" type="button" hidden aria-label="Track verwijderen" title="Verwijderen">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M4 7h16M10 4h4M6 7l1 13h10l1-13M10 11v6M14 11v6"/>
+            </svg>
+          </button>
+          <button id="trackCloseBtn" class="btn icon" type="button" aria-label="Sluiten">&times;</button>
+        </div>
       </div>
       <form id="trackForm" class="form">
         <input id="trackId" type="hidden" />
@@ -1259,6 +1352,19 @@ svg.leaflet-image-layer.leaflet-interactive path {
           <button class="btn primary" type="submit">Bewaar</button>
         </div>
       </form>
+    </section>
+  </div>
+
+  <div id="chooseModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="chooseTitle">
+    <section class="sheet">
+      <div class="sheet-head">
+        <div id="chooseTitle" class="sheet-title">Delen</div>
+        <button id="chooseCloseBtn" class="btn icon" type="button" aria-label="Sluiten">&times;</button>
+      </div>
+      <div class="form">
+        <div id="chooseHint" class="hint" hidden></div>
+        <div id="chooseOptions" class="choose-options"></div>
+      </div>
     </section>
   </div>
 
@@ -2029,6 +2135,11 @@ exports.OpenLocationCode = OpenLocationCode;
       const BACKUP_INTERVAL_MS = 60000;
       const UNDO_WINDOW_MS = 12000;
 
+      const DEFAULT_CATEGORIES = [
+        'horeca', 'tankstation', 'kort verblijf', 'lang verblijf',
+        'korte pauze', 'parkeren', 'gebeurtenis'
+      ];
+
       const DEFAULT_CENTER = [52.3676, 4.9041];
       const DEFAULT_ZOOM = 12;
       const SPLIT_PRESETS = [0.62, 0.3, 0.86];
@@ -2037,6 +2148,8 @@ exports.OpenLocationCode = OpenLocationCode;
       const els = {};
       for (const id of [
         'items', 'count', 'modal', 'waypointForm', 'modalTitle', 'id', 'title', 'note',
+        'category', 'group', 'categoryOptions', 'groupOptions', 'deleteBtn', 'trackDeleteBtn',
+        'shareSelBtn', 'clearSelBtn', 'chooseModal', 'chooseTitle', 'chooseOptions', 'chooseHint', 'chooseCloseBtn',
         'occasions', 'addOccasionBtn', 'lat', 'lng', 'address', 'addBtn', 'importBtn', 'importFile',
         'exportBtn', 'recordBtn', 'refreshBtn', 'modalLocateBtn', 'coordApplyBtn',
         'coordPasteBtn', 'placeSearch', 'placeSearchBtn', 'searchResults', 'searchStatus',
@@ -2055,10 +2168,11 @@ exports.OpenLocationCode = OpenLocationCode;
        * ------------------------------------------------------------------ */
       let items = [];
       let activeTrack = null;
-      let selectedItemId = null;
+      const selection = new Set();    // ids of every activated item
 
       const markers = new Map();      // id -> { marker, sig }
       const trackLayers = new Map();  // id -> { group, sig }
+      const groupLines = new Map();   // group name -> dotted connector polyline
       let activeTrackLayer = null;
       let activeTrackSegment = null;
       let locationMarker = null;
@@ -2075,6 +2189,7 @@ exports.OpenLocationCode = OpenLocationCode;
       let lastKnownPosition = null;
       let lastItemInteractionAt = 0;
       let autoFollowPausedUntil = 0;
+      let lastUsedGroup = '';   // pre-fills the next waypoint of the same trip
       let locationWatchId = null;
       let pendingUndo = null;
 
@@ -2438,6 +2553,10 @@ exports.OpenLocationCode = OpenLocationCode;
         popupAnchor: [0, -30]
       });
 
+      // Marker graphics rise above their coordinate, and the toolbar floats over
+      // the top of the map, so framing is padded in pixels rather than degrees.
+      const FIT_PADDING = { paddingTopLeft: [34, 58], paddingBottomRight: [34, 26] };
+
       const TRACK_STYLE = { color: '#0a84ff', weight: 5, opacity: .85, renderer: trackRenderer };
       const ACTIVE_TRACK_STYLE = { color: '#ff3b30', weight: 6, opacity: .95, renderer: trackRenderer };
 
@@ -2512,8 +2631,16 @@ exports.OpenLocationCode = OpenLocationCode;
         return `w|${item.lat}|${item.lng}|${item.title}|${item.address || ''}|${occasions}`;
       }
 
+      const SELECT_TOGGLE = `
+        <button class="mini toggle" type="button" data-action="toggle" aria-label="Selecteer of deselecteer">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" stroke-width="2"/>
+            <path class="tick" d="M8 12.4l2.8 2.8L16 9" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>`;
+
       function listRow(item) {
-        const selected = String(item.id) === selectedItemId ? ' selected' : '';
+        const selected = isSelected(item.id) ? ' selected' : '';
         if (isTrack(item)) {
           const timeText = item.endAt
             ? `${formatDateTime(item.startAt)} → ${formatDateTime(item.endAt)}`
@@ -2527,8 +2654,8 @@ exports.OpenLocationCode = OpenLocationCode;
                 ${item.note ? `<div class="item-note">${escapeHtml(item.note)}</div>` : ''}
               </div>
               <div class="item-actions">
+                ${SELECT_TOGGLE}
                 <button class="mini" type="button" data-action="edit" aria-label="Track bewerken">✎</button>
-                ${item.active ? '' : '<button class="mini delete" type="button" data-action="delete" aria-label="Track verwijderen">×</button>'}
               </div>
             </article>`;
         }
@@ -2537,24 +2664,77 @@ exports.OpenLocationCode = OpenLocationCode;
         return `
           <article class="item${selected}" data-id="${escapeHtml(item.id)}" data-type="waypoint">
             <div class="item-main" data-action="show">
-              <div class="item-title">${escapeHtml(item.title)}</div>
+              <div class="item-title">${item.category ? `<span class="item-cat">${escapeHtml(item.category)}</span>` : ''}${escapeHtml(item.title)}</div>
               ${timeText ? `<div class="item-time">${escapeHtml(timeText)}</div>` : ''}
               <div class="item-address">${escapeHtml(item.address || `${Number(item.lat).toFixed(6)}, ${Number(item.lng).toFixed(6)}`)}</div>
               ${item.note ? `<div class="item-note">${escapeHtml(item.note)}</div>` : ''}
             </div>
             <div class="item-actions">
+              ${SELECT_TOGGLE}
               <button class="mini" type="button" data-action="edit" aria-label="Bewerken">✎</button>
-              <button class="mini delete" type="button" data-action="delete" aria-label="Verwijderen">×</button>
             </div>
           </article>`;
       }
 
+      const itemGroup = (item) => String(item?.group || '').trim();
+
+      // Chronological within a group: the list order and the dotted connector
+      // on the map then tell the same story.
+      const itemMoment = (item) => {
+        const first = sortOccasions(itemOccasions(item))[0];
+        return first?.startAt || item.startAt || item.createdAt || '';
+      };
+
+      // A stable colour per group name, so list dot and map line match.
+      function groupColor(name) {
+        let hash = 0;
+        for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) % 360;
+        return `hsl(${hash}, 68%, 45%)`;
+      }
+
+      function groupedSections() {
+        const groups = new Map();
+        const ungrouped = [];
+        for (const item of items) {
+          const name = itemGroup(item);
+          if (!name) { ungrouped.push(item); continue; }
+          if (!groups.has(name)) groups.set(name, []);
+          groups.get(name).push(item);
+        }
+        const sections = [...groups.entries()]
+          .map(([name, members]) => ({
+            name,
+            items: [...members].sort((a, b) => itemMoment(a).localeCompare(itemMoment(b)))
+          }))
+          .sort((a, b) => itemMoment(a.items[0]).localeCompare(itemMoment(b.items[0])));
+        if (ungrouped.length) sections.push({ name: '', items: ungrouped });
+        return sections;
+      }
+
+      function groupHeadHtml(name, count) {
+        return `
+          <div class="group-head">
+            <span class="group-dot" style="background:${name ? groupColor(name) : 'var(--muted)'}"></span>
+            <span class="group-name">${escapeHtml(name || 'Zonder groep')}</span>
+            <span class="group-rule"></span>
+            <span class="group-count">${count}</span>
+          </div>`;
+      }
+
       function renderList() {
-        const all = activeTrack ? [activeTrack, ...items] : items;
-        els.count.textContent = `${all.length} item${all.length === 1 ? '' : 's'}`;
-        els.items.innerHTML = all.length
-          ? all.map(listRow).join('')
-          : '<div class="empty">Nog niets opgeslagen.<br>Tik op \u{1F4CD} voor een waypoint, houd de kaart ingedrukt voor een waypoint op die plek, of start een track met de rode knop.</div>';
+        const total = (activeTrack ? 1 : 0) + items.length;
+        if (!total) {
+          els.items.innerHTML = '<div class="empty">Nog niets opgeslagen.<br>Tik op \u{1F4CD} voor een waypoint, houd de kaart ingedrukt voor een waypoint op die plek, of start een track met de rode knop.</div>';
+          return;
+        }
+
+        const head = activeTrack ? listRow(activeTrack) : '';
+        const sections = groupedSections();
+        // Only switch to headed sections once groups are actually in use.
+        const useGroups = sections.some(section => section.name);
+        els.items.innerHTML = head + (useGroups
+          ? sections.map(section => groupHeadHtml(section.name, section.items.length) + section.items.map(listRow).join('')).join('')
+          : items.map(listRow).join(''));
       }
 
       function syncMapLayers() {
@@ -2604,7 +2784,42 @@ exports.OpenLocationCode = OpenLocationCode;
           if (!liveIds.has(id)) { map.removeLayer(entry.group); trackLayers.delete(id); }
         }
 
+        syncGroupLines();
         syncActiveTrackLayer();
+      }
+
+      // Thin dotted connector through the waypoints of one group, in the same
+      // chronological order the list shows them.
+      function syncGroupLines() {
+        const wanted = new Map();
+        for (const section of groupedSections()) {
+          if (!section.name) continue;
+          const points = section.items
+            .filter(item => !isTrack(item) && validCoords(Number(item.lat), Number(item.lng)))
+            .map(item => [Number(item.lat), Number(item.lng)]);
+          if (points.length > 1) wanted.set(section.name, points);
+        }
+
+        for (const [name, entry] of groupLines) {
+          if (!wanted.has(name)) { map.removeLayer(entry.line); groupLines.delete(name); }
+        }
+
+        for (const [name, points] of wanted) {
+          const signature = points.map(p => p.join(',')).join('|');
+          const existing = groupLines.get(name);
+          if (existing?.sig === signature) continue;
+          if (existing) map.removeLayer(existing.line);
+          const line = L.polyline(points, {
+            color: groupColor(name),
+            weight: 2,
+            opacity: .75,
+            dashArray: '2 7',
+            interactive: false,
+            renderer: trackRenderer
+          }).addTo(map);
+          line.bringToBack();
+          groupLines.set(name, { line, sig: signature });
+        }
       }
 
       function syncActiveTrackLayer(rebuild = false) {
@@ -2652,42 +2867,77 @@ exports.OpenLocationCode = OpenLocationCode;
         return items.find(candidate => String(candidate.id) === key) || null;
       }
 
+      const isSelected = (id) => selection.has(String(id));
+
       function applySelectionStyles() {
-        els.items.querySelectorAll('.item.selected').forEach(el => el.classList.remove('selected'));
-        markers.forEach(({ marker }) => {
-          marker.setZIndexOffset(0);
-          marker.getElement()?.classList.remove('sel');
+        const active = selection.size > 0;
+
+        els.items.querySelectorAll('.item').forEach(row =>
+          row.classList.toggle('selected', isSelected(row.dataset.id)));
+
+        markers.forEach(({ marker }, id) => {
+          const on = isSelected(id);
+          marker.setZIndexOffset(on ? 1000 : 0);
+          const element = marker.getElement();
+          element?.classList.toggle('sel', on);
+          element?.classList.toggle('dim', active && !on);
         });
-        const restyle = (entry, style) => entry.group.eachLayer(layer =>
-          layer.setStyle && layer.setStyle({ weight: style.weight, opacity: style.opacity, color: style.color }));
-        trackLayers.forEach(entry => restyle(entry, TRACK_STYLE));
-        if (activeTrackLayer) {
-          activeTrackLayer.eachLayer(layer => layer.setStyle &&
-            layer.setStyle({ weight: ACTIVE_TRACK_STYLE.weight, opacity: ACTIVE_TRACK_STYLE.opacity, color: ACTIVE_TRACK_STYLE.color }));
-        }
-        if (!selectedItemId) return;
 
-        els.items.querySelector(`.item[data-id="${CSS.escape(selectedItemId)}"]`)?.classList.add('selected');
+        const restyle = (group, style, on) => group?.eachLayer(layer => layer.setStyle && layer.setStyle(
+          on ? { weight: Math.max(9, style.weight + 3), opacity: 1, color: '#ff9500' }
+             : { weight: style.weight, opacity: active ? style.opacity * .35 : style.opacity, color: style.color }));
+        trackLayers.forEach((entry, id) => restyle(entry.group, TRACK_STYLE, isSelected(id)));
+        if (activeTrack) restyle(activeTrackLayer, ACTIVE_TRACK_STYLE, isSelected(activeTrack.id));
 
-        const markerEntry = markers.get(selectedItemId);
-        if (markerEntry) {
-          markerEntry.marker.setZIndexOffset(1000);
-          markerEntry.marker.getElement()?.classList.add('sel');
-          return;
-        }
-
-        const group = activeTrack && String(activeTrack.id) === selectedItemId
-          ? activeTrackLayer
-          : trackLayers.get(selectedItemId)?.group;
-        group?.eachLayer(layer => layer.setStyle && layer.setStyle({ weight: 9, opacity: 1, color: '#ff9500' }));
+        els.count.classList.toggle('has-selection', active);
+        els.count.textContent = active
+          ? `${selection.size} geselecteerd`
+          : `${(activeTrack ? 1 : 0) + items.length} item${(activeTrack ? 1 : 0) + items.length === 1 ? '' : 's'}`;
+        els.shareSelBtn.hidden = !active;
+        els.clearSelBtn.hidden = !active;
       }
 
-      function selectedLayerBounds(id) {
-        const group = activeTrack && String(activeTrack.id) === id
+      function layerBoundsFor(id) {
+        const group = activeTrack && String(activeTrack.id) === String(id)
           ? activeTrackLayer
-          : trackLayers.get(id)?.group;
+          : trackLayers.get(String(id))?.group;
         const bounds = group?.getBounds?.();
         return bounds && bounds.isValid() ? bounds : null;
+      }
+
+      // Every activated item, waypoints as points and tracks as their extent.
+      function selectionBounds() {
+        const coordinates = [];
+        for (const id of selection) {
+          const item = findItem(id);
+          if (!item) continue;
+          if (isTrack(item)) {
+            const bounds = layerBoundsFor(id);
+            if (bounds) coordinates.push(bounds.getNorthWest(), bounds.getSouthEast());
+            else for (const point of item.points || []) coordinates.push([point.lat, point.lng]);
+          } else {
+            coordinates.push([item.lat, item.lng]);
+          }
+        }
+        if (!coordinates.length) return null;
+        const bounds = L.latLngBounds(coordinates);
+        return bounds.isValid() ? bounds : null;
+      }
+
+      // "Show exactly the selection": frame the map on everything activated.
+      function fitSelection() {
+        const bounds = selectionBounds();
+        if (!bounds) return false;
+        pauseAutoFollow(60000);
+        // Tapping several items in quick succession would otherwise leave the
+        // map on the first fit: Leaflet ignores a move issued mid-animation.
+        map.stop();
+        if (bounds.getNorthEast().equals(bounds.getSouthWest())) {
+          map.setView(bounds.getCenter(), Math.max(map.getZoom(), 16), { animate: true });
+        } else {
+          map.fitBounds(bounds, { ...FIT_PADDING, maxZoom: 17, animate: true });
+        }
+        return true;
       }
 
       function scrollListTo(id) {
@@ -2701,15 +2951,18 @@ exports.OpenLocationCode = OpenLocationCode;
        * Single entry point for both directions.
        *  - fromList (default): move the map to the item.
        *  - fromMap: scroll the list to the item.
+       * Replaces the selection; use toggleItem to activate several at once.
        */
       function selectItem(id, { fromMap = false } = {}) {
         const key = String(id);
         const item = findItem(key);
         if (!item) return;
 
-        selectedItemId = key;
+        selection.clear();
+        selection.add(key);
         lastItemInteractionAt = Date.now();
         pauseAutoFollow(60000);
+        map.stop();
         applySelectionStyles();
 
         if (fromMap) {
@@ -2718,8 +2971,8 @@ exports.OpenLocationCode = OpenLocationCode;
         }
 
         if (isTrack(item)) {
-          const bounds = selectedLayerBounds(key);
-          if (bounds) map.fitBounds(bounds.pad(0.2), { maxZoom: 17, animate: true });
+          const bounds = layerBoundsFor(key);
+          if (bounds) map.fitBounds(bounds, { ...FIT_PADDING, maxZoom: 17, animate: true });
           else toast('Deze track heeft nog geen GPS-punten.');
           return;
         }
@@ -2728,9 +2981,30 @@ exports.OpenLocationCode = OpenLocationCode;
         markers.get(key)?.marker.openPopup();
       }
 
+      // Reframing is debounced: tapping four items in a row should settle on
+      // one view of all four, not race through four separate animations.
+      let fitTimer = 0;
+      function scheduleFitSelection(delay = 160) {
+        clearTimeout(fitTimer);
+        fitTimer = setTimeout(() => { fitTimer = 0; fitSelection(); }, delay);
+      }
+
+      // Add or remove one item, then reframe the map on everything selected.
+      function toggleItem(id) {
+        const key = String(id);
+        if (!findItem(key)) return;
+        if (!selection.delete(key)) selection.add(key);
+        lastItemInteractionAt = Date.now();
+        map.closePopup();
+        applySelectionStyles();
+        if (selection.size) scheduleFitSelection();
+      }
+
       function clearSelection() {
-        if (!selectedItemId) return;
-        selectedItemId = null;
+        if (!selection.size) return;
+        clearTimeout(fitTimer);
+        selection.clear();
+        map.closePopup();
         applySelectionStyles();
       }
 
@@ -2743,7 +3017,8 @@ exports.OpenLocationCode = OpenLocationCode;
         for (const p of activeTrack?.points || []) coordinates.push([p.lat, p.lng]);
         if (!coordinates.length) return false;
         pauseAutoFollow(60000);
-        map.fitBounds(L.latLngBounds(coordinates).pad(0.2), { maxZoom: 16 });
+        map.stop();
+        map.fitBounds(L.latLngBounds(coordinates), { ...FIT_PADDING, maxZoom: 16 });
         return true;
       }
 
@@ -2759,18 +3034,34 @@ exports.OpenLocationCode = OpenLocationCode;
         const item = findItem(article.dataset.id);
         if (!item) return;
 
+        if (action === 'toggle') { toggleItem(item.id); return; }
         if (action === 'show') { selectItem(item.id); return; }
-        if (action === 'edit') { isTrack(item) ? openTrackModal(item) : openModal(item); return; }
-        if (action !== 'delete' || item.active) return;
+        if (action === 'edit') isTrack(item) ? openTrackModal(item) : openModal(item);
+      });
 
-        if (!confirm(`Verwijder “${item.title}”?`)) return;
+      // Deleting lives in the editor now, so a mistap in the list can never
+      // remove anything.
+      function deleteItem(item) {
+        if (!item || item.active) return false;
+        if (!confirm(`Verwijder “${item.title}”?`)) return false;
         const before = snapshot();
         writeBackup(true);
         items = items.filter(candidate => String(candidate.id) !== String(item.id));
-        if (selectedItemId === String(item.id)) selectedItemId = null;
+        selection.delete(String(item.id));
         saveItems();
         render();
         offerUndo(isTrack(item) ? 'Track verwijderd.' : 'Waypoint verwijderd.', before);
+        return true;
+      }
+
+      els.deleteBtn.addEventListener('click', () => {
+        const item = items.find(candidate => String(candidate.id) === els.id.value);
+        if (deleteItem(item)) closeModal(true);
+      });
+
+      els.trackDeleteBtn.addEventListener('click', () => {
+        const track = findItem(els.trackId.value);
+        if (deleteItem(track)) closeTrackModal(true);
       });
 
       /* ------------------------------------------------------------------ *
@@ -2831,7 +3122,29 @@ exports.OpenLocationCode = OpenLocationCode;
 
       function serializeWaypointForm() {
         return JSON.stringify([els.id.value, els.title.value, els.note.value,
+          els.category.value, els.group.value,
           readOccasionRows(), els.lat.value, els.lng.value, els.address.value]);
+      }
+
+      // Datalists grow with whatever the user has typed before.
+      function fillDatalist(element, values) {
+        element.replaceChildren(...values.map(value => {
+          const option = document.createElement('option');
+          option.value = value;
+          return option;
+        }));
+      }
+
+      function refreshDatalists() {
+        const collect = (read) => [...new Set(items.map(read).map(v => String(v || '').trim()).filter(Boolean))]
+          .sort((a, b) => a.localeCompare(b));
+        fillDatalist(els.groupOptions, collect(item => item.group));
+        const used = collect(item => item.category);
+        const merged = [...DEFAULT_CATEGORIES];
+        for (const value of used) {
+          if (!merged.some(existing => existing.toLowerCase() === value.toLowerCase())) merged.push(value);
+        }
+        fillDatalist(els.categoryOptions, merged);
       }
 
       function serializeTrackForm() {
@@ -2874,9 +3187,13 @@ exports.OpenLocationCode = OpenLocationCode;
         els.id.value = item?.id || '';
         els.title.value = item?.title || '';
         els.note.value = item?.note || '';
+        els.category.value = item?.category || '';
+        els.group.value = item?.group || lastUsedGroup;
+        refreshDatalists();
         renderOccasions(item ? sortOccasions(itemOccasions(item)) : []);
         els.address.value = item?.address || '';
         els.modalTitle.textContent = isEdit ? 'Waypoint bewerken' : 'Waypoint toevoegen';
+        els.deleteBtn.hidden = !isEdit || !items.some(candidate => String(candidate.id) === String(item.id));
 
         const lat = item?.lat ?? coords?.lat ?? map.getCenter().lat;
         const lng = item?.lng ?? coords?.lng ?? map.getCenter().lng;
@@ -2893,6 +3210,11 @@ exports.OpenLocationCode = OpenLocationCode;
         setTimeout(() => { waypointFormBaseline = serializeWaypointForm(); }, 0);
       }
 
+      function syncModalVisibleClass() {
+        const open = [els.modal, els.trackModal, els.chooseModal].some(element => element.classList.contains('open'));
+        document.body.classList.toggle('modal-visible', open);
+      }
+
       function closeModal(force = false) {
         if (force !== true && els.modal.classList.contains('open') &&
             serializeWaypointForm() !== waypointFormBaseline &&
@@ -2900,7 +3222,7 @@ exports.OpenLocationCode = OpenLocationCode;
           return false;
         }
         els.modal.classList.remove('open');
-        document.body.classList.toggle('modal-visible', els.trackModal.classList.contains('open'));
+        syncModalVisibleClass();
         if (modalMapMarker && modalMap) { modalMap.removeLayer(modalMapMarker); modalMapMarker = null; }
         lastResolvedCoords = null;
         hideSearchResults();
@@ -2935,6 +3257,8 @@ exports.OpenLocationCode = OpenLocationCode;
           type: 'waypoint',
           title: els.title.value.trim(),
           note: els.note.value.trim(),
+          category: els.category.value.trim(),
+          group: els.group.value.trim(),
           occasions,
           startAt: span.startAt,
           endAt: span.endAt,
@@ -2947,12 +3271,14 @@ exports.OpenLocationCode = OpenLocationCode;
         if (index >= 0) items[index] = item;
         else items.unshift(item);
 
+        lastUsedGroup = item.group;
         saveItems();
         waypointFormBaseline = serializeWaypointForm();
         closeModal(true);
-        selectedItemId = String(item.id);
+        selection.clear();
+        selection.add(String(item.id));
         render();
-        scrollListTo(selectedItemId);
+        scrollListTo(String(item.id));
         const visits = occasions.length > 1 ? ` (${occasions.length} bezoeken)` : '';
         toast((index >= 0 ? 'Waypoint bijgewerkt' : 'Waypoint bewaard') + visits + '.');
       });
@@ -3430,7 +3756,18 @@ exports.OpenLocationCode = OpenLocationCode;
       /* ------------------------------------------------------------------ *
        * Sharing
        * ------------------------------------------------------------------ */
-      const googleMapsUrl = (lat, lng) => `https://www.google.com/maps?q=${encodeURIComponent(`${lat},${lng}`)}`;
+      // Commas and pipes are legal in a query value, and Google's URL scheme
+      // expects them raw, so these are built by hand rather than with
+      // URLSearchParams (which would percent-encode them into noise).
+      const googleMapsUrl = (lat, lng) => `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+
+      function googleDirectionsUrl(points) {
+        const coords = points.map(point => `${point.lat},${point.lng}`);
+        const middle = coords.slice(1, -1);
+        return 'https://www.google.com/maps/dir/?api=1' +
+          `&origin=${coords[0]}&destination=${coords[coords.length - 1]}` +
+          (middle.length ? `&waypoints=${middle.join('|')}` : '');
+      }
 
       async function shareText(title, text) {
         try {
@@ -3484,7 +3821,7 @@ exports.OpenLocationCode = OpenLocationCode;
       els.waypointMapsBtn.addEventListener('click', () => {
         const { lat, lng } = readCoords();
         if (!validCoords(lat, lng)) { toast('Voer eerst geldige coördinaten in.'); return; }
-        const url = `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+        const url = googleMapsUrl(lat, lng);
         if (window.open(url, '_blank', 'noopener')) return;
         // Standalone home-screen apps can block window.open; a synthetic link
         // still opens Safari and leaves this app running in the background.
@@ -3496,6 +3833,294 @@ exports.OpenLocationCode = OpenLocationCode;
         link.click();
         link.remove();
       });
+
+      /* ------------------------------------------------------------------ *
+       * Sharing a selection: text card + a rendered PNG of the map
+       * ------------------------------------------------------------------ */
+      function selectedItems() {
+        return [...selection].map(findItem).filter(Boolean)
+          .sort((a, b) => itemMoment(a).localeCompare(itemMoment(b)));
+      }
+
+      function itemShareBlock(item, index) {
+        const lines = [`${index + 1}. ${item.title}${item.category ? ` [${item.category}]` : ''}`];
+        if (itemGroup(item)) lines.push(`   Groep: ${itemGroup(item)}`);
+        if (isTrack(item)) {
+          const stats = trackStats(item);
+          lines.push(`   ${occasionText({ startAt: item.startAt, endAt: item.endAt })}`);
+          lines.push(`   ${formatDistance(stats.distance)} · ${formatDuration(stats.durationMs)} · ${stats.points} punten`);
+          const first = item.points?.[0];
+          if (first) lines.push(`   ${googleMapsUrl(first.lat, first.lng)}`);
+        } else {
+          for (const occasion of sortOccasions(itemOccasions(item))) lines.push(`   ${occasionText(occasion)}`);
+          if (item.address) lines.push(`   ${item.address}`);
+          lines.push(`   ${googleMapsUrl(item.lat, item.lng)}`);
+        }
+        if (item.note) lines.push(`   ${item.note}`);
+        return lines.join('\n');
+      }
+
+      function selectionShareText(list) {
+        const waypoints = list.filter(item => !isTrack(item));
+        const header = list.length === 1 ? list[0].title : `${list.length} locaties`;
+        const blocks = list.map(itemShareBlock);
+
+        // A single directions link that strings the whole selection together.
+        const route = waypoints.length > 1
+          ? `Route langs alle punten:\n${googleDirectionsUrl(waypoints)}`
+          : '';
+        return [header, '', blocks.join('\n\n'), route].filter(Boolean).join('\n');
+      }
+
+      /* --- static PNG of the map for the current selection --- */
+      function loadImage(src) {
+        return new Promise(resolve => {
+          const image = new Image();
+          image.crossOrigin = 'anonymous';
+          image.onload = () => resolve(image);
+          image.onerror = () => resolve(null);
+          image.src = src;
+          setTimeout(() => resolve(image.complete ? image : null), 8000);
+        });
+      }
+
+      function zoomForBounds(bounds, width, height, padding) {
+        const crs = map.options.crs;
+        for (let zoom = 18; zoom > 1; zoom--) {
+          const nw = crs.latLngToPoint(bounds.getNorthWest(), zoom);
+          const se = crs.latLngToPoint(bounds.getSouthEast(), zoom);
+          if (se.x - nw.x <= width - padding * 2 && se.y - nw.y <= height - padding * 2) return zoom;
+        }
+        return 2;
+      }
+
+      async function renderSelectionPng(list) {
+        const bounds = selectionBounds();
+        if (!bounds) return null;
+
+        const size = 1024;
+        const padding = 90;
+        const crs = map.options.crs;
+        const zoom = bounds.getNorthEast().equals(bounds.getSouthWest())
+          ? Math.min(16, map.getZoom())
+          : zoomForBounds(bounds, size, size, padding);
+        const centre = crs.latLngToPoint(bounds.getCenter(), zoom);
+        const origin = centre.subtract([size / 2, size / 2]);
+        const project = (lat, lng) => crs.latLngToPoint(L.latLng(lat, lng), zoom).subtract(origin);
+
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#dcdce1';
+        ctx.fillRect(0, 0, size, size);
+
+        // Tiles. crossOrigin is set, and OSM serves CORS headers, so the
+        // canvas stays untainted and can be exported.
+        const tileSize = 256;
+        const count = Math.pow(2, zoom);
+        const subdomains = ['a', 'b', 'c'];
+        const jobs = [];
+        for (let x = Math.floor(origin.x / tileSize); x <= Math.floor((origin.x + size) / tileSize); x++) {
+          for (let y = Math.floor(origin.y / tileSize); y <= Math.floor((origin.y + size) / tileSize); y++) {
+            if (y < 0 || y >= count) continue;
+            const wrappedX = ((x % count) + count) % count;
+            const url = `https://${subdomains[Math.abs(x + y) % 3]}.tile.openstreetmap.org/${zoom}/${wrappedX}/${y}.png`;
+            jobs.push(loadImage(url).then(image => ({ image, dx: x * tileSize - origin.x, dy: y * tileSize - origin.y })));
+          }
+        }
+        for (const { image, dx, dy } of await Promise.all(jobs)) {
+          if (image) ctx.drawImage(image, dx, dy, tileSize, tileSize);
+        }
+
+        // Group connectors, then tracks, then pins on top.
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        for (const section of groupedSections()) {
+          if (!section.name) continue;
+          const members = section.items.filter(item => !isTrack(item) && isSelected(item.id));
+          if (members.length < 2) continue;
+          ctx.save();
+          ctx.setLineDash([3, 10]);
+          ctx.strokeStyle = groupColor(section.name);
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          members.forEach((item, index) => {
+            const point = project(item.lat, item.lng);
+            index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y);
+          });
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        for (const item of list.filter(isTrack)) {
+          ctx.strokeStyle = '#0a84ff';
+          ctx.lineWidth = 5;
+          for (const segment of splitTrackSegments(item)) {
+            if (segment.length < 2) continue;
+            ctx.beginPath();
+            segment.forEach(([lat, lng], index) => {
+              const point = project(lat, lng);
+              index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y);
+            });
+            ctx.stroke();
+          }
+        }
+
+        list.filter(item => !isTrack(item)).forEach((item, index) => {
+          const point = project(item.lat, item.lng);
+          // Two passes: a white silhouette first, then the blue body on top.
+          // Stroking the two subpaths directly would draw an outline straight
+          // across the seam where the head meets the stem.
+          const pin = (fill, halo) => {
+            ctx.fillStyle = fill;
+            ctx.strokeStyle = fill;
+            ctx.lineWidth = halo;
+            ctx.beginPath();
+            ctx.moveTo(point.x, point.y);
+            ctx.lineTo(point.x - 9, point.y - 22);
+            ctx.lineTo(point.x + 9, point.y - 22);
+            ctx.closePath();
+            if (halo) ctx.stroke();
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(point.x, point.y - 28, 13, 0, Math.PI * 2);
+            if (halo) ctx.stroke();
+            ctx.fill();
+          };
+          pin('#ffffff', 7);
+          pin('#0a84ff', 0);
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 15px -apple-system, system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(String(index + 1), point.x, point.y - 27);
+
+          const label = item.title.length > 26 ? item.title.slice(0, 25) + '…' : item.title;
+          ctx.font = 'bold 15px -apple-system, system-ui, sans-serif';
+          ctx.lineWidth = 4;
+          ctx.strokeStyle = 'rgba(255,255,255,.95)';
+          ctx.strokeText(label, point.x, point.y + 16);
+          ctx.fillStyle = '#111114';
+          ctx.fillText(label, point.x, point.y + 16);
+        });
+
+        // OpenStreetMap requires visible attribution on exported maps.
+        ctx.font = '13px -apple-system, system-ui, sans-serif';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'bottom';
+        const credit = '© OpenStreetMap contributors';
+        const width = ctx.measureText(credit).width;
+        ctx.fillStyle = 'rgba(255,255,255,.8)';
+        ctx.fillRect(size - width - 14, size - 26, width + 14, 26);
+        ctx.fillStyle = '#333';
+        ctx.fillText(credit, size - 7, size - 6);
+
+        try {
+          return await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+        } catch {
+          return null;   // tainted canvas: tiles were served without CORS
+        }
+      }
+
+      function chooseAction(title, hint, options) {
+        return new Promise(resolve => {
+          els.chooseTitle.textContent = title;
+          els.chooseHint.textContent = hint || '';
+          els.chooseHint.hidden = !hint;
+          els.chooseOptions.replaceChildren(...options.map(option => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'btn' + (option.primary ? ' primary' : '');
+            button.innerHTML = `${escapeHtml(option.label)}${option.detail ? `<small>${escapeHtml(option.detail)}</small>` : ''}`;
+            button.addEventListener('click', () => { close(option.value); });
+            return button;
+          }));
+
+          const close = (value) => {
+            els.chooseModal.classList.remove('open');
+            syncModalVisibleClass();
+            els.chooseCloseBtn.onclick = null;
+            els.chooseModal.onclick = null;
+            resolve(value);
+          };
+          els.chooseCloseBtn.onclick = () => close(null);
+          els.chooseModal.onclick = (event) => { if (event.target === els.chooseModal) close(null); };
+          els.chooseModal.classList.add('open');
+          document.body.classList.add('modal-visible');
+        });
+      }
+
+      function downloadBlob(blob, filename) {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+      }
+
+      async function shareSelection() {
+        const list = selectedItems();
+        if (!list.length) { toast('Selecteer eerst één of meer items.'); return; }
+
+        const text = selectionShareText(list);
+        const title = list.length === 1 ? list[0].title : `${list.length} locaties`;
+        const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+
+        els.shareSelBtn.disabled = true;
+        try {
+          const blob = await renderSelectionPng(list);
+          const file = blob ? new File([blob], `kaart-${stamp}.png`, { type: 'image/png' }) : null;
+
+          // Preferred path: one share sheet carrying both the card text and
+          // the map image.
+          if (file && navigator.canShare?.({ files: [file], text, title })) {
+            try {
+              await navigator.share({ files: [file], text, title });
+              return;
+            } catch (error) {
+              if (error?.name === 'AbortError') return;
+              // fall through to the choice below
+            }
+          }
+
+          const choice = await chooseAction(
+            'Delen',
+            file
+              ? 'Tekst en kaart samen delen kan niet in deze browser. Kies wat je wilt delen.'
+              : 'De kaartafbeelding kon niet worden gemaakt. Je kunt de tekst wel delen.',
+            [
+              { label: 'Deel tekst', detail: `${list.length} kaart${list.length === 1 ? 'je' : 'jes'} met Google Maps-links`, value: 'text', primary: true },
+              ...(file ? [{ label: 'Deel kaart (PNG)', detail: 'Afbeelding van de selectie', value: 'png' }] : [])
+            ]
+          );
+          if (!choice) return;
+
+          if (choice === 'text') {
+            await shareText(title, text);
+            return;
+          }
+
+          if (navigator.canShare?.({ files: [file] })) {
+            try {
+              await navigator.share({ files: [file], title });
+              return;
+            } catch (error) {
+              if (error?.name === 'AbortError') return;
+            }
+          }
+          downloadBlob(blob, file.name);
+          toast('Kaart bewaard als PNG.');
+        } finally {
+          els.shareSelBtn.disabled = false;
+        }
+      }
+
+      els.shareSelBtn.addEventListener('click', () => void shareSelection());
+      els.clearSelBtn.addEventListener('click', clearSelection);
 
       els.waypointShareBtnBottom.addEventListener('click', () =>
         shareText(els.title.value.trim() || 'Waypoint', waypointShareText()));
@@ -3630,7 +4255,8 @@ exports.OpenLocationCode = OpenLocationCode;
         items.unshift(completed);
         saveItems();
         writeBackup(true);
-        selectedItemId = String(completed.id);
+        selection.clear();
+        selection.add(String(completed.id));
         render();
         openTrackModal(completed, true);
       }
@@ -3651,6 +4277,7 @@ exports.OpenLocationCode = OpenLocationCode;
         els.trackDuration.textContent = formatDuration(stats.durationMs);
         els.trackPoints.textContent = String(stats.points);
         els.trackModalTitle.textContent = track.active ? 'Lopende track' : (justFinalized ? 'Track afronden' : 'Track bewerken');
+        els.trackDeleteBtn.hidden = Boolean(track.active) || !items.some(candidate => String(candidate.id) === String(track.id));
         els.trackWarning.hidden = !stats.gaps;
         els.trackWarning.textContent = stats.gaps
           ? `${stats.gaps} onderbreking${stats.gaps === 1 ? '' : 'en'} gevonden. De kaart toont losse segmenten en verbindt ontbrekende GPS-periodes niet.`
@@ -3667,7 +4294,7 @@ exports.OpenLocationCode = OpenLocationCode;
           return false;
         }
         els.trackModal.classList.remove('open');
-        document.body.classList.toggle('modal-visible', els.modal.classList.contains('open'));
+        syncModalVisibleClass();
         trackFormBaseline = '';
         return true;
       }
@@ -3775,6 +4402,8 @@ exports.OpenLocationCode = OpenLocationCode;
           type: 'waypoint',
           title,
           note: String(raw.note || ''),
+          category: String(raw.category || '').trim(),
+          group: String(raw.group || '').trim(),
           occasions,
           startAt: span.startAt,
           endAt: span.endAt,
@@ -3958,7 +4587,7 @@ exports.OpenLocationCode = OpenLocationCode;
         const modalOpen = els.modal.classList.contains('open') || els.trackModal.classList.contains('open');
         const itemIdle = Date.now() - lastItemInteractionAt >= 5000;
         const mapIdle = Date.now() >= autoFollowPausedUntil;
-        if (!modalOpen && itemIdle && mapIdle && !selectedItemId) {
+        if (!modalOpen && itemIdle && mapIdle && !selection.size) {
           map.panTo([lat, lng], { animate: true, duration: .5 });
         }
       }
@@ -4026,7 +4655,8 @@ exports.OpenLocationCode = OpenLocationCode;
       window.addEventListener('orientationchange', () => setTimeout(() => map.invalidateSize(), 250));
       document.addEventListener('keydown', event => {
         if (event.key !== 'Escape') return;
-        if (els.modal.classList.contains('open')) closeModal();
+        if (els.chooseModal.classList.contains('open')) els.chooseCloseBtn.click();
+        else if (els.modal.classList.contains('open')) closeModal();
         else if (els.trackModal.classList.contains('open')) closeTrackModal();
         else clearSelection();
       });
