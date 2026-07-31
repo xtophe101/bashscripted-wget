@@ -1237,6 +1237,11 @@ svg.leaflet-image-layer.leaflet-interactive path {
                 <path d="M6 6l12 12M18 6L6 18"/>
               </svg>
             </button>
+            <button id="layersBtn" class="btn icon" type="button" aria-label="Kies kaartlaag" title="Kaartlaag">
+              <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 3 3 8l9 5 9-5-9-5zM3 13l9 5 9-5M3 17.5l9 5 9-5"/>
+              </svg>
+            </button>
             <button id="fitBtn" class="btn icon" type="button" aria-label="Toon alles op de kaart" title="Toon alles">
               <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M3 9V4h5M21 9V4h-5M3 15v5h5M21 15v5h-5"/><circle cx="12" cy="12" r="2.5"/>
@@ -2169,6 +2174,7 @@ exports.OpenLocationCode = OpenLocationCode;
       const INTENT_EMPTY_KEY = STORAGE_KEY + '-cleared-at';
       const SPLIT_KEY = STORAGE_KEY + '-split';
       const COLLAPSED_KEY = STORAGE_KEY + '-collapsed-groups';
+      const BASEMAP_KEY = STORAGE_KEY + '-basemap';
       const HINT_KEY = STORAGE_KEY + '-hint-seen';
       const REFRESH_BACKUP_KEY = STORAGE_KEY + '-refresh-backup';
       const REFRESH_PENDING_KEY = STORAGE_KEY + '-refresh-pending';
@@ -2200,7 +2206,7 @@ exports.OpenLocationCode = OpenLocationCode;
       for (const id of [
         'items', 'count', 'modal', 'waypointForm', 'modalTitle', 'id', 'title', 'note',
         'category', 'group', 'categoryOptions', 'groupOptions', 'deleteBtn', 'trackDeleteBtn',
-        'shareSelBtn', 'clearSelBtn', 'chooseModal', 'chooseTitle', 'chooseOptions', 'chooseHint', 'chooseCloseBtn',
+        'shareSelBtn', 'clearSelBtn', 'layersBtn', 'chooseModal', 'chooseTitle', 'chooseOptions', 'chooseHint', 'chooseCloseBtn',
         'occasions', 'addOccasionBtn', 'lat', 'lng', 'address', 'addBtn', 'importBtn', 'importFile',
         'exportBtn', 'recordBtn', 'refreshBtn', 'modalLocateBtn', 'coordApplyBtn',
         'coordPasteBtn', 'placeSearch', 'placeSearchBtn', 'searchResults', 'searchStatus',
@@ -2605,13 +2611,85 @@ exports.OpenLocationCode = OpenLocationCode;
 
       L.control.zoom({ position: 'bottomleft' }).addTo(map);
 
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: 19,
-        crossOrigin: true,
-        updateWhenIdle: true,
-        keepBuffer: 3,
-        attribution: '&copy; OpenStreetMap'
-      }).addTo(map);
+      /* ------------------------------------------------------------------ *
+       * Basemaps. All are key-free and send CORS headers, which the PNG
+       * export depends on; `credit` is the attribution burned into that PNG.
+       * ------------------------------------------------------------------ */
+      const BASEMAPS = {
+        osm: {
+          name: 'Standaard', detail: 'OpenStreetMap',
+          url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+          subdomains: 'abc', maxZoom: 19,
+          attribution: '&copy; OpenStreetMap',
+          credit: '© OpenStreetMap contributors'
+        },
+        light: {
+          name: 'Licht', detail: 'Rustige kaart, veel contrast met de pins',
+          url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
+          subdomains: 'abcd', maxZoom: 20,
+          attribution: '&copy; OpenStreetMap, &copy; CARTO',
+          credit: '© OpenStreetMap contributors, © CARTO'
+        },
+        dark: {
+          name: 'Donker', detail: 'Donkere kaart voor s nachts',
+          url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
+          subdomains: 'abcd', maxZoom: 20,
+          attribution: '&copy; OpenStreetMap, &copy; CARTO',
+          credit: '© OpenStreetMap contributors, © CARTO'
+        },
+        satellite: {
+          name: 'Satelliet', detail: 'Luchtfoto (Esri World Imagery)',
+          url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+          subdomains: '', maxZoom: 19,
+          attribution: 'Tiles &copy; Esri',
+          credit: 'Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics'
+        },
+        terrain: {
+          name: 'Terrein', detail: 'Hoogtelijnen en reliëf (OpenTopoMap)',
+          url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+          subdomains: 'abc', maxZoom: 17,
+          attribution: '&copy; OpenStreetMap, SRTM | &copy; OpenTopoMap (CC-BY-SA)',
+          credit: '© OpenStreetMap contributors, SRTM | © OpenTopoMap (CC-BY-SA)'
+        }
+      };
+
+      let basemapKey = BASEMAPS[localStorage.getItem(BASEMAP_KEY)] ? localStorage.getItem(BASEMAP_KEY) : 'osm';
+      const basemap = () => BASEMAPS[basemapKey];
+
+      function createTileLayer(extra = {}) {
+        const config = basemap();
+        const options = {
+          maxZoom: config.maxZoom,
+          crossOrigin: true,
+          updateWhenIdle: true,
+          keepBuffer: 3,
+          attribution: config.attribution,
+          ...extra
+        };
+        // Leaflet resolves {s} for every tile even when the template has no
+        // placeholder, so the key is omitted rather than set to undefined,
+        // which would shadow its default and throw on each tile.
+        if (config.subdomains) options.subdomains = config.subdomains;
+        return L.tileLayer(config.url, options);
+      }
+
+      let baseLayer = createTileLayer().addTo(map);
+      let modalBaseLayer = null;
+
+      function applyBasemap(key) {
+        if (!BASEMAPS[key] || key === basemapKey) return;
+        basemapKey = key;
+        try { localStorage.setItem(BASEMAP_KEY, key); } catch {}
+        map.removeLayer(baseLayer);
+        baseLayer = createTileLayer().addTo(map);
+        if (modalMap && modalBaseLayer) {
+          modalMap.removeLayer(modalBaseLayer);
+          modalBaseLayer = createTileLayer({ keepBuffer: 1 }).addTo(modalMap);
+        }
+        // Zoom levels differ per source; never leave the map past the maximum.
+        if (map.getZoom() > basemap().maxZoom) map.setZoom(basemap().maxZoom);
+        toast(`Kaartlaag: ${basemap().name}.`);
+      }
 
       const trackRenderer = L.canvas({ tolerance: 12, padding: 0.4 });
 
@@ -2996,6 +3074,8 @@ exports.OpenLocationCode = OpenLocationCode;
           : `${(activeTrack ? 1 : 0) + items.length} item${(activeTrack ? 1 : 0) + items.length === 1 ? '' : 's'}`;
         els.shareSelBtn.hidden = !active;
         els.clearSelBtn.hidden = !active;
+        els.fitBtn.title = active ? 'Toon selectie' : 'Toon alles';
+        els.fitBtn.setAttribute('aria-label', active ? 'Toon de selectie op de kaart' : 'Toon alles op de kaart');
       }
 
       // Heading badge shows "selected/total" and lights up when the whole group
@@ -3298,7 +3378,7 @@ exports.OpenLocationCode = OpenLocationCode;
       function ensureModalMap(lat, lng) {
         if (!modalMap) {
           modalMap = L.map('modalMap', { zoomControl: true, attributionControl: false, preferCanvas: true });
-          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, updateWhenIdle: true }).addTo(modalMap);
+          modalBaseLayer = createTileLayer({ keepBuffer: 1 }).addTo(modalMap);
           modalMap.on('click', async event => {
             pauseAutoFollow(60000);
             setCoords(event.latlng.lat, event.latlng.lng);
@@ -4027,6 +4107,117 @@ exports.OpenLocationCode = OpenLocationCode;
         });
       }
 
+      function tileUrl(config, z, x, y) {
+        const subs = config.subdomains || '';
+        return config.url
+          .replace('{s}', subs ? subs[Math.abs(x + y) % subs.length] : '')
+          .replace('{z}', z)
+          .replace('{x}', x)
+          .replace('{y}', y)
+          .replace('{r}', '');
+      }
+
+      /* ------------------------------------------------------------------ *
+       * Label placement
+       *
+       * Placing point labels without overlap is NP-hard, so this uses the
+       * standard heuristic. Each label gets a fixed set of candidate slots
+       * around its pin. Cost of a slot = overlapping area with pins (weighted
+       * heavier, since covering a pin is worse than clipping a label), with
+       * labels already placed, and with the area falling outside the canvas.
+       * Labels are assigned greedily most-constrained-first, then a few
+       * local-search passes re-place one label at a time against the others,
+       * which is what actually clears the clusters.
+       * ------------------------------------------------------------------ */
+      const boxOverlap = (a, b) =>
+        Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)) *
+        Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+
+      const pinObstacles = (anchors) =>
+        anchors.map(point => ({ x: point.x - 16, y: point.y - 46, w: 32, h: 48 }));
+
+      function labelCandidates(anchor, w, h) {
+        return [
+          { x: anchor.x - w / 2, y: anchor.y + 6 },            // under the tip
+          { x: anchor.x + 17, y: anchor.y - 36 - h / 2 },      // right of the head
+          { x: anchor.x - 17 - w, y: anchor.y - 36 - h / 2 },  // left of the head
+          { x: anchor.x - w / 2, y: anchor.y - 50 - h },       // above the head
+          { x: anchor.x + 12, y: anchor.y + 4 },
+          { x: anchor.x - 12 - w, y: anchor.y + 4 },
+          { x: anchor.x + 12, y: anchor.y - 50 - h },
+          { x: anchor.x - 12 - w, y: anchor.y - 50 - h },
+          { x: anchor.x - w / 2, y: anchor.y + 10 + h },       // second row down
+          { x: anchor.x - w / 2, y: anchor.y - 56 - 2 * h }    // second row up
+        ];
+      }
+
+      function layoutLabels(boxes, obstacles, bounds) {
+        const slots = boxes.map(box => labelCandidates(box.anchor, box.w, box.h));
+        const placed = boxes.map(() => null);
+
+        const outside = (rect) => {
+          const inside = boxOverlap(rect, bounds);
+          return rect.w * rect.h - inside;
+        };
+
+        const cost = (index, slot) => {
+          const box = boxes[index];
+          const rect = { x: slot.x, y: slot.y, w: box.w, h: box.h };
+          let total = outside(rect) * 3;
+          for (const obstacle of obstacles) total += boxOverlap(rect, obstacle) * 1.6;
+          for (let other = 0; other < boxes.length; other++) {
+            if (other === index || !placed[other]) continue;
+            total += boxOverlap(rect, { ...placed[other], w: boxes[other].w, h: boxes[other].h });
+          }
+          return total;
+        };
+
+        // Most constrained first: fewest slots that clear the pins outright.
+        const order = boxes.map((box, index) => {
+          const free = slots[index].filter(slot => {
+            const rect = { x: slot.x, y: slot.y, w: box.w, h: box.h };
+            return obstacles.every(obstacle => boxOverlap(rect, obstacle) === 0) && outside(rect) === 0;
+          }).length;
+          return { index, free, y: box.anchor.y };
+        }).sort((a, b) => a.free - b.free || a.y - b.y);
+
+        const bestSlot = (index) => {
+          let best = null;
+          let bestCost = Infinity;
+          slots[index].forEach((slot, rank) => {
+            const value = cost(index, slot) + rank * 0.5;   // ties prefer the canonical slot
+            if (value < bestCost) { bestCost = value; best = slot; }
+          });
+          return { slot: best, cost: bestCost };
+        };
+
+        for (const { index } of order) placed[index] = bestSlot(index).slot;
+
+        // Local search: re-place each label knowing where the others ended up.
+        for (let pass = 0; pass < 3; pass++) {
+          let improved = false;
+          for (const { index } of order) {
+            const current = placed[index];
+            placed[index] = null;
+            const { slot } = bestSlot(index);
+            placed[index] = slot;
+            if (slot !== current) improved = true;
+          }
+          if (!improved) break;
+        }
+
+        // Anything still badly buried is dropped; the numbered pin identifies
+        // it and the shared text lists the same numbers.
+        return placed.map((slot, index) => {
+          if (!slot) return null;
+          placed[index] = null;
+          const residual = cost(index, slot);
+          placed[index] = slot;
+          const area = boxes[index].w * boxes[index].h;
+          return residual > area * 0.75 ? null : slot;
+        });
+      }
+
       function zoomForBounds(bounds, width, height, padding) {
         const crs = map.options.crs;
         for (let zoom = 18; zoom > 1; zoom--) {
@@ -4058,17 +4249,17 @@ exports.OpenLocationCode = OpenLocationCode;
         ctx.fillStyle = '#dcdce1';
         ctx.fillRect(0, 0, size, size);
 
-        // Tiles. crossOrigin is set, and OSM serves CORS headers, so the
-        // canvas stays untainted and can be exported.
+        // Tiles come from the chosen basemap. crossOrigin is set and every
+        // source sends CORS headers, so the canvas stays exportable.
+        const config = basemap();
         const tileSize = 256;
         const count = Math.pow(2, zoom);
-        const subdomains = ['a', 'b', 'c'];
         const jobs = [];
         for (let x = Math.floor(origin.x / tileSize); x <= Math.floor((origin.x + size) / tileSize); x++) {
           for (let y = Math.floor(origin.y / tileSize); y <= Math.floor((origin.y + size) / tileSize); y++) {
             if (y < 0 || y >= count) continue;
             const wrappedX = ((x % count) + count) % count;
-            const url = `https://${subdomains[Math.abs(x + y) % 3]}.tile.openstreetmap.org/${zoom}/${wrappedX}/${y}.png`;
+            const url = tileUrl(config, zoom, wrappedX, y);
             jobs.push(loadImage(url).then(image => ({ image, dx: x * tileSize - origin.x, dy: y * tileSize - origin.y })));
           }
         }
@@ -4110,8 +4301,11 @@ exports.OpenLocationCode = OpenLocationCode;
           }
         }
 
-        list.filter(item => !isTrack(item)).forEach((item, index) => {
-          const point = project(item.lat, item.lng);
+        const waypoints = list.filter(item => !isTrack(item));
+        const anchors = waypoints.map(item => project(item.lat, item.lng));
+
+        // Pins first, so no label can be hidden underneath one.
+        anchors.forEach((point, index) => {
           // Two passes: a white silhouette first, then the blue body on top.
           // Stroking the two subpaths directly would draw an outline straight
           // across the seam where the head meets the stem.
@@ -4138,21 +4332,49 @@ exports.OpenLocationCode = OpenLocationCode;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillText(String(index + 1), point.x, point.y - 27);
+        });
 
-          const label = item.title.length > 26 ? item.title.slice(0, 25) + '…' : item.title;
-          ctx.font = 'bold 15px -apple-system, system-ui, sans-serif';
-          ctx.lineWidth = 4;
-          ctx.strokeStyle = 'rgba(255,255,255,.95)';
-          ctx.strokeText(label, point.x, point.y + 16);
+        // Labels are placed by search, not by a fixed offset.
+        const fontSize = waypoints.length > 8 ? 13 : 15;
+        const maxChars = waypoints.length > 8 ? 20 : 26;
+        ctx.font = `bold ${fontSize}px -apple-system, system-ui, sans-serif`;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+
+        const padX = 5;
+        const padY = 3;
+        const boxes = waypoints.map((item, index) => {
+          const text = item.title.length > maxChars ? item.title.slice(0, maxChars - 1) + '…' : item.title;
+          return {
+            text,
+            anchor: anchors[index],
+            w: Math.ceil(ctx.measureText(text).width) + padX * 2,
+            h: fontSize + padY * 2 + 2
+          };
+        });
+
+        const placements = layoutLabels(boxes, pinObstacles(anchors), { x: 4, y: 4, w: size - 8, h: size - 34 });
+
+        placements.forEach((place, index) => {
+          if (!place) return;   // no readable slot: the numbered pin still identifies it
+          const box = boxes[index];
+          ctx.fillStyle = 'rgba(255,255,255,.86)';
+          ctx.strokeStyle = 'rgba(0,0,0,.10)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          if (ctx.roundRect) ctx.roundRect(place.x, place.y, box.w, box.h, 5);
+          else ctx.rect(place.x, place.y, box.w, box.h);
+          ctx.fill();
+          ctx.stroke();
           ctx.fillStyle = '#111114';
-          ctx.fillText(label, point.x, point.y + 16);
+          ctx.fillText(box.text, place.x + padX, place.y + padY + 1);
         });
 
         // OpenStreetMap requires visible attribution on exported maps.
         ctx.font = '13px -apple-system, system-ui, sans-serif';
         ctx.textAlign = 'right';
         ctx.textBaseline = 'bottom';
-        const credit = '© OpenStreetMap contributors';
+        const credit = basemap().credit;
         const width = ctx.measureText(credit).width;
         ctx.fillStyle = 'rgba(255,255,255,.8)';
         ctx.fillRect(size - width - 14, size - 26, width + 14, 26);
@@ -4699,7 +4921,25 @@ exports.OpenLocationCode = OpenLocationCode;
       map.on('click', () => clearSelection());
 
       els.fitBtn.addEventListener('click', () => {
+        // With items activated this frames the selection; only with an empty
+        // selection does it fall back to everything.
+        if (selection.size) {
+          clearTimeout(fitTimer);
+          if (!fitSelection()) toast('De selectie heeft geen positie op de kaart.');
+          return;
+        }
         if (!fitItems()) toast('Nog niets om te tonen.');
+      });
+
+      els.layersBtn.addEventListener('click', async () => {
+        const chosen = await chooseAction('Kaartlaag', 'Geldt voor de kaart, het bewerkscherm en de gedeelde afbeelding.',
+          Object.entries(BASEMAPS).map(([key, config]) => ({
+            label: config.name + (key === basemapKey ? ' ✓' : ''),
+            detail: config.detail,
+            value: key,
+            primary: key === basemapKey
+          })));
+        if (chosen) applyBasemap(chosen);
       });
 
       els.locateBtn.addEventListener('click', () => {
