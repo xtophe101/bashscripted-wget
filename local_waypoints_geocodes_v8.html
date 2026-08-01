@@ -2754,23 +2754,27 @@ exports.OpenLocationCode = OpenLocationCode;
       const MARKER_TIERS = [
         { minZoom: 14, kind: 'pin', size: [26, 34], emoji: 19 },  // street & town
         { minZoom: 11, kind: 'pin', size: [21, 28], emoji: 15 },  // city & region
-        { minZoom: 8,  kind: 'dot', size: 11 },                   // province
-        { minZoom: 5,  kind: 'dot', size: 8 },                    // country
-        { minZoom: 0,  kind: 'dot', size: 6 }                     // continent & world
+        { minZoom: 8,  kind: 'dot', size: 13 },                   // province
+        { minZoom: 5,  kind: 'dot', size: 11 },                   // country
+        { minZoom: 0,  kind: 'dot', size: 9 }                     // continent & world
       ];
+      // Zoomed out a hairline reads as noise, so the connector keeps a floor
+      // and its dash grows with it, staying as legible as the track lines.
       const TRACK_WEIGHTS = [
-        { minZoom: 15, weight: 6 },
-        { minZoom: 12, weight: 5 },
-        { minZoom: 9, weight: 4 },
-        { minZoom: 6, weight: 3 },
-        { minZoom: 0, weight: 2 }
+        { minZoom: 15, weight: 6, connector: 2, dash: '2 7' },
+        { minZoom: 12, weight: 5, connector: 2, dash: '2 7' },
+        { minZoom: 9,  weight: 5, connector: 3, dash: '3 8' },
+        { minZoom: 6,  weight: 4, connector: 3, dash: '3 9' },
+        { minZoom: 0,  weight: 3, connector: 3, dash: '4 10' }
       ];
 
       const tierFor = (zoom) => MARKER_TIERS.find(tier => zoom >= tier.minZoom) || MARKER_TIERS.at(-1);
-      const weightFor = (zoom) => (TRACK_WEIGHTS.find(step => zoom >= step.minZoom) || TRACK_WEIGHTS.at(-1)).weight;
+      const stepFor = (zoom) => TRACK_WEIGHTS.find(step => zoom >= step.minZoom) || TRACK_WEIGHTS.at(-1);
+      const weightFor = (zoom) => stepFor(zoom).weight;
 
       let markerTier = tierFor(map.getZoom());
-      let trackWeight = weightFor(map.getZoom());
+      let trackStep = stepFor(map.getZoom());
+      let trackWeight = trackStep.weight;
       const trackScale = () => trackWeight / TRACK_STYLE.weight;
 
       // A title that opens with an emoji says more than a generic pin, so the
@@ -2799,6 +2803,15 @@ exports.OpenLocationCode = OpenLocationCode;
         }
         const match = text.match(EMOJI_RE);
         return match ? { emoji: match[0], units: 1 } : { emoji: '', units: 0 };
+      }
+
+      // When the emoji is drawn as the marker, repeating it in the title right
+      // next to it says nothing twice.
+      function titleWithoutIcon(item) {
+        const { emoji } = leadingEmoji(item.title);
+        if (!emoji) return item.title;
+        const rest = String(item.title).trim().slice(emoji.length).trim();
+        return rest || item.title;   // a title that is only an emoji keeps it
       }
 
       function iconFor(item, tier = markerTier) {
@@ -2837,20 +2850,25 @@ exports.OpenLocationCode = OpenLocationCode;
       function applyZoomScale() {
         const zoom = map.getZoom();
         const tier = tierFor(zoom);
-        const weight = weightFor(zoom);
-        if (tier === markerTier && weight === trackWeight) return;
+        const step = stepFor(zoom);
+        if (tier === markerTier && step === trackStep) return;
         markerTier = tier;
-        trackWeight = weight;
+        trackStep = step;
+        trackWeight = step.weight;
 
         markers.forEach((entry, id) => {
           const item = findItem(id);
-          if (item) entry.marker.setIcon(iconFor(item, tier));
+          if (!item) return;
+          entry.marker.setIcon(iconFor(item, tier));
+          // The icon may have gained or lost the emoji, so the popup title
+          // follows it rather than repeating what the marker already shows.
+          entry.marker.setPopupContent(popupHtml(item));
         });
         trackLayers.forEach(entry => entry.group.eachLayer(layer =>
-          layer.setStyle && layer.setStyle({ weight })));
+          layer.setStyle && layer.setStyle({ weight: step.weight })));
         if (activeTrackLayer) activeTrackLayer.eachLayer(layer =>
-          layer.setStyle && layer.setStyle({ weight: Math.max(2, weight + 1) }));
-        groupLines.forEach(entry => entry.line.setStyle({ weight: Math.max(1, Math.round(weight * 0.4)) }));
+          layer.setStyle && layer.setStyle({ weight: step.weight + 1 }));
+        groupLines.forEach(entry => entry.line.setStyle({ weight: step.connector, dashArray: step.dash }));
         applySelectionStyles();   // setIcon replaces the element, so restyle
       }
 
@@ -3065,6 +3083,16 @@ exports.OpenLocationCode = OpenLocationCode;
           : items.map(listRow).join(''));
       }
 
+      function popupHtml(item) {
+        const visits = sortOccasions(itemOccasions(item));
+        const showsEmoji = markerTier.kind === 'pin' && leadingEmoji(item.title).emoji;
+        const title = showsEmoji ? titleWithoutIcon(item) : item.title;
+        return `<strong>${escapeHtml(title)}</strong><br>` +
+          visits.slice(0, 3).map(occasion => `${escapeHtml(occasionText(occasion))}<br>`).join('') +
+          (visits.length > 3 ? `<em>+${visits.length - 3} bezoek${visits.length - 3 === 1 ? '' : 'en'}</em><br>` : '') +
+          escapeHtml(item.address || `${Number(item.lat).toFixed(5)}, ${Number(item.lng).toFixed(5)}`);
+      }
+
       function syncMapLayers() {
         const liveIds = new Set();
 
@@ -3085,11 +3113,7 @@ exports.OpenLocationCode = OpenLocationCode;
 
           if (trackLayers.has(id)) { map.removeLayer(trackLayers.get(id).group); trackLayers.delete(id); }
           const existing = markers.get(id);
-          const visits = sortOccasions(itemOccasions(item));
-          const popup = `<strong>${escapeHtml(item.title)}</strong><br>` +
-            visits.slice(0, 3).map(occasion => `${escapeHtml(occasionText(occasion))}<br>`).join('') +
-            (visits.length > 3 ? `<em>+${visits.length - 3} bezoek${visits.length - 3 === 1 ? '' : 'en'}</em><br>` : '') +
-            escapeHtml(item.address || `${Number(item.lat).toFixed(5)}, ${Number(item.lng).toFixed(5)}`);
+          const popup = popupHtml(item);
 
           if (existing) {
             if (existing.sig === signature) continue;
@@ -3139,9 +3163,9 @@ exports.OpenLocationCode = OpenLocationCode;
           if (existing) map.removeLayer(existing.line);
           const line = L.polyline(points, {
             color: groupColor(name),
-            weight: Math.max(1, Math.round(2 * trackScale())),
-            opacity: .75,
-            dashArray: '2 7',
+            weight: trackStep.connector,
+            opacity: .85,
+            dashArray: trackStep.dash,
             interactive: false,
             renderer: trackRenderer
           }).addTo(map);
@@ -4536,7 +4560,8 @@ exports.OpenLocationCode = OpenLocationCode;
         const padX = 5;
         const padY = 3;
         const boxes = waypoints.map((item, index) => {
-          const text = item.title.length > maxChars ? item.title.slice(0, maxChars - 1) + '…' : item.title;
+          const full = leadingEmoji(item.title).emoji ? titleWithoutIcon(item) : item.title;
+          const text = full.length > maxChars ? full.slice(0, maxChars - 1) + '…' : full;
           return {
             text,
             anchor: anchors[index],
