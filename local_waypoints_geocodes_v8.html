@@ -1086,6 +1086,24 @@ svg.leaflet-image-layer.leaflet-interactive path {
     .form { padding: 8px; }
     .field { margin-bottom: 7px; }
     label { display: block; margin: 0 0 3px 2px; font-size: 10.5px; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+    select {
+      width: 100%;
+      min-height: 42px;
+      padding: 8px 34px 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 11px;
+      background: var(--panel-2) no-repeat right 12px center;
+      background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+      background-size: 5px 5px, 5px 5px;
+      background-position: right 16px center, right 11px center;
+      font-size: 16px;
+      line-height: 1.2;
+      outline: none;
+      appearance: none;
+      -webkit-appearance: none;
+    }
+    select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
     input, textarea {
       width: 100%;
       min-width: 0; /* datetime-local has a wide intrinsic size and would clip its column */
@@ -1414,6 +1432,12 @@ svg.leaflet-image-layer.leaflet-interactive path {
           <label for="trackTitle">Titel</label>
           <input id="trackTitle" maxlength="100" placeholder="Opgenomen track" required />
         </div>
+        <div class="field">
+          <label for="trackMode">Tracking</label>
+          <select id="trackMode"></select>
+          <div id="trackModeHint" class="hint"></div>
+        </div>
+
         <div class="row2">
           <div class="field">
             <label for="trackCategory">Categorie</label>
@@ -2210,37 +2234,220 @@ exports.OpenLocationCode = OpenLocationCode;
       /* ------------------------------------------------------------------ *
        * Constants & element cache
        * ------------------------------------------------------------------ */
+      /* ==================================================================
+       * CONFIGURATIEREGISTER
+       *
+       * Alle drempels, bereiken, criteria en keuzelijsten staan hier bij
+       * elkaar. De rest van de code verwijst hiernaar en bevat zelf geen
+       * losse getallen. Wat tijdens het gebruik kan veranderen (tracking,
+       * schaal, categorieën) wordt op het moment van gebruik uit CONFIG
+       * gelezen, zodat een wijziging meteen doorwerkt.
+       *
+       * Handmatig aanpassen zonder de code te bewerken kan met een JSON in
+       * localStorage onder de sleutel `local-waypoints-v1-config`. Die wordt
+       * bij het opstarten over de standaard heen gelegd (diep samengevoegd),
+       * bijvoorbeeld: {"tracking":{"stationaryRadiusM":40}}
+       * ================================================================== */
       const STORAGE_KEY = 'local-waypoints-v1';
-      const BACKUP_KEY = STORAGE_KEY + '-backup';
-      const INTENT_EMPTY_KEY = STORAGE_KEY + '-cleared-at';
-      const SPLIT_KEY = STORAGE_KEY + '-split';
-      const COLLAPSED_KEY = STORAGE_KEY + '-collapsed-groups';
-      const BASEMAP_KEY = STORAGE_KEY + '-basemap';
-      const HINT_KEY = STORAGE_KEY + '-hint-seen';
-      const REFRESH_BACKUP_KEY = STORAGE_KEY + '-refresh-backup';
-      const REFRESH_PENDING_KEY = STORAGE_KEY + '-refresh-pending';
-      const REFRESH_QUERY_KEY = '_lw_refresh';
-      const ACTIVE_TRACK_KEY = STORAGE_KEY + '-active-track';
-      const ACTIVE_TRACK_BACKUP_KEY = STORAGE_KEY + '-active-track-backup';
-      const W3W_API_KEY_KEY = STORAGE_KEY + '-what3words-api-key';
 
-      const TRACK_DB_NAME = 'local-waypoints-durable-v1';
-      const TRACK_DB_STORE = 'recovery';
-      const TRACK_INTERVAL_MS = 5000;
-      const GAP_THRESHOLD_MS = 15000;
-      const MIN_TRACK_MOVE_M = 25;
-      const MAX_ACCEPTED_ACCURACY_M = 100;
-      const BACKUP_INTERVAL_MS = 60000;
-      const UNDO_WINDOW_MS = 12000;
+      const DEFAULT_CONFIG = {
+        /* --- opslag -------------------------------------------------- */
+        storage: {
+          key: STORAGE_KEY,
+          suffixes: {
+            config: '-config',
+            backup: '-backup',
+            clearedAt: '-cleared-at',
+            split: '-split',
+            collapsedGroups: '-collapsed-groups',
+            basemap: '-basemap',
+            hintSeen: '-hint-seen',
+            refreshBackup: '-refresh-backup',
+            refreshPending: '-refresh-pending',
+            activeTrack: '-active-track',
+            activeTrackBackup: '-active-track-backup',
+            what3wordsKey: '-what3words-api-key'
+          },
+          refreshQueryKey: '_lw_refresh',
+          durableDbName: 'local-waypoints-durable-v1',
+          durableDbStore: 'recovery',
+          backupIntervalMs: 60000,
+          undoWindowMs: 12000
+        },
 
-      const DEFAULT_CATEGORIES = [
-        'horeca', 'tankstation', 'kort verblijf', 'lang verblijf',
-        'korte pauze', 'parkeren', 'gebeurtenis'
-      ];
+        /* --- trackopname --------------------------------------------- */
+        tracking: {
+          // 'auto' laat de snelheid het profiel kiezen; anders een vaste id
+          // uit `profiles` hieronder.
+          defaultMode: 'auto',
+          // Een punt telt alleen mee als de fix nauwkeurig genoeg is.
+          maxAccuracyM: 100,
+          // Onderbreking in de lijn zodra er zo lang niets binnenkwam.
+          gapThresholdMs: 15000,
+          gpsTimeoutMs: 4500,
+          gpsMaximumAgeMs: 1000,
+          // Exponentieel voortschrijdend gemiddelde over de snelheid: hoger
+          // reageert sneller, lager is rustiger. 0 < alpha <= 1.
+          speedSmoothing: 0.4,
+          // Marge rond een profielgrens waarbinnen niet wordt omgeschakeld,
+          // zodat het profiel niet heen en weer springt. 0.15 = 15%.
+          hysteresis: 0.15,
+          // Stilstaan: opeenvolgende punten binnen deze straal worden tot
+          // één per interval beperkt.
+          stationaryRadiusM: 25,
+          stationaryMaxIntervalMs: 3600000,
+          // Snelheidsprofielen, oplopend op maxSpeedKmh. minMoveM is de
+          // afstand die een nieuw punt moet toevoegen, sampleMs hoe vaak de
+          // GPS wordt bevraagd, maxIntervalMs dwingt een hartslagpunt af.
+          profiles: [
+            { id: 'stationary', label: 'Stilstaan', icon: '⏸', maxSpeedKmh: 2,
+              minMoveM: 25, sampleMs: 30000, maxIntervalMs: 3600000 },
+            { id: 'walking', label: 'Lopen', icon: '🚶', maxSpeedKmh: 8,
+              minMoveM: 5, sampleMs: 4000, maxIntervalMs: 600000 },
+            { id: 'cycling', label: 'Fietsen', icon: '🚲', maxSpeedKmh: 30,
+              minMoveM: 20, sampleMs: 5000, maxIntervalMs: 600000 },
+            { id: 'city', label: 'Stad', icon: '🏙', maxSpeedKmh: 70,
+              minMoveM: 50, sampleMs: 5000, maxIntervalMs: 600000 },
+            { id: 'highway', label: 'Snelweg', icon: '🛣', maxSpeedKmh: 200,
+              minMoveM: 100, sampleMs: 5000, maxIntervalMs: 600000 },
+            { id: 'flight', label: 'Vliegen', icon: '✈️', maxSpeedKmh: Infinity,
+              minMoveM: 1000, sampleMs: 10000, maxIntervalMs: 600000 }
+          ]
+        },
 
-      const DEFAULT_CENTER = [52.3676, 4.9041];
-      const DEFAULT_ZOOM = 12;
-      const SPLIT_PRESETS = [0.62, 0.3, 0.86];
+        /* --- kaart ---------------------------------------------------- */
+        map: {
+          defaultCenter: [52.3676, 4.9041],
+          defaultZoom: 12,
+          zoomSnap: 0.5,
+          fitMaxZoom: 17,
+          fitAllMaxZoom: 16,
+          singleItemZoom: 16,
+          fitPaddingX: 30,
+          fitPaddingBottom: 24,
+          fitPaddingTopShare: 0.4,   // maximaal deel van de kaarthoogte
+          autoFollowPauseMs: 30000,
+          autoFollowLongPauseMs: 60000,
+          itemIdleMs: 5000,
+          locateTimeoutMs: 12000,
+          canvasTolerance: 12
+        },
+
+        /* --- markers per zoomniveau ----------------------------------- */
+        markers: {
+          pinHeight: 34,
+          tiers: [
+            { minZoom: 14, kind: 'pin', size: [26, 34], emoji: 19 },
+            { minZoom: 11, kind: 'pin', size: [21, 28], emoji: 15 },
+            { minZoom: 8, kind: 'dot', size: 13 },
+            { minZoom: 5, kind: 'dot', size: 11 },
+            { minZoom: 0, kind: 'dot', size: 9 }
+          ]
+        },
+
+        /* --- lijnen per zoomniveau ------------------------------------ */
+        tracks: {
+          colorSaved: '#0a84ff',
+          colorActive: '#ff3b30',
+          colorSelected: '#ff9500',
+          opacitySaved: 0.85,
+          opacityActive: 0.95,
+          dimFactor: 0.35,
+          selectedExtraWeight: 4,
+          connectorOpacity: 0.85,
+          weights: [
+            { minZoom: 15, weight: 6, connector: 2, dash: '2 7' },
+            { minZoom: 12, weight: 5, connector: 2, dash: '2 7' },
+            { minZoom: 9, weight: 5, connector: 3, dash: '3 8' },
+            { minZoom: 6, weight: 4, connector: 3, dash: '3 9' },
+            { minZoom: 0, weight: 3, connector: 3, dash: '4 10' }
+          ]
+        },
+
+        /* --- gedeelde kaartafbeelding --------------------------------- */
+        export: {
+          size: 1024,
+          padding: 90,
+          tileSize: 256,
+          tileTimeoutMs: 8000,
+          labelFontSize: 15,
+          labelFontSizeDense: 13,
+          labelMaxChars: 26,
+          labelMaxCharsDense: 20,
+          denseThreshold: 8,
+          labelDropRatio: 0.75,     // meer overlap dan dit deel: label weglaten
+          obstacleWeight: 1.6,      // pin bedekken weegt zwaarder dan overlap
+          outsideWeight: 3,
+          slotPenalty: 0.5,
+          searchPasses: 3
+        },
+
+        /* --- geocoding ------------------------------------------------ */
+        geocoding: {
+          timeoutMs: 10000,
+          searchLimit: 5,
+          coordinateDebounceMs: 650
+        },
+
+        /* --- interface ------------------------------------------------ */
+        ui: {
+          splitPresets: [0.62, 0.3, 0.86],
+          splitMin: 0.12,
+          splitMax: 0.9,
+          wideScreenPx: 760,
+          toastMs: 2000,
+          categories: [
+            'horeca', 'tankstation', 'kort verblijf', 'lang verblijf',
+            'korte pauze', 'parkeren', 'gebeurtenis'
+          ]
+        }
+      };
+
+      // Diep samenvoegen, zodat een override alleen hoeft te noemen wat
+      // afwijkt. Arrays worden in hun geheel vervangen.
+      function mergeConfig(base, override) {
+        if (!override || typeof override !== 'object' || Array.isArray(override)) return base;
+        const result = Array.isArray(base) ? [...base] : { ...base };
+        for (const [key, value] of Object.entries(override)) {
+          result[key] = value && typeof value === 'object' && !Array.isArray(value)
+            ? mergeConfig(base?.[key] ?? {}, value)
+            : value;
+        }
+        return result;
+      }
+
+      const CONFIG = (() => {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY + DEFAULT_CONFIG.storage.suffixes.config);
+          return raw ? mergeConfig(DEFAULT_CONFIG, JSON.parse(raw)) : DEFAULT_CONFIG;
+        } catch {
+          return DEFAULT_CONFIG;   // een kapotte override mag niets breken
+        }
+      })();
+
+      const storageKey = (name) => CONFIG.storage.key + CONFIG.storage.suffixes[name];
+
+      const BACKUP_KEY = storageKey('backup');
+      const INTENT_EMPTY_KEY = storageKey('clearedAt');
+      const SPLIT_KEY = storageKey('split');
+      const COLLAPSED_KEY = storageKey('collapsedGroups');
+      const BASEMAP_KEY = storageKey('basemap');
+      const HINT_KEY = storageKey('hintSeen');
+      const REFRESH_BACKUP_KEY = storageKey('refreshBackup');
+      const REFRESH_PENDING_KEY = storageKey('refreshPending');
+      const REFRESH_QUERY_KEY = CONFIG.storage.refreshQueryKey;
+      const ACTIVE_TRACK_KEY = storageKey('activeTrack');
+      const ACTIVE_TRACK_BACKUP_KEY = storageKey('activeTrackBackup');
+      const W3W_API_KEY_KEY = storageKey('what3wordsKey');
+
+      const TRACK_DB_NAME = CONFIG.storage.durableDbName;
+      const TRACK_DB_STORE = CONFIG.storage.durableDbStore;
+      const BACKUP_INTERVAL_MS = CONFIG.storage.backupIntervalMs;
+      const UNDO_WINDOW_MS = CONFIG.storage.undoWindowMs;
+
+      const DEFAULT_CENTER = CONFIG.map.defaultCenter;
+      const DEFAULT_ZOOM = CONFIG.map.defaultZoom;
+      const SPLIT_PRESETS = CONFIG.ui.splitPresets;
 
       const $ = (id) => document.getElementById(id);
       const els = {};
@@ -2253,7 +2460,7 @@ exports.OpenLocationCode = OpenLocationCode;
         'coordPasteBtn', 'placeSearch', 'placeSearchBtn', 'searchResults', 'searchStatus',
         'waypointShareBtnBottom', 'waypointMapsBtn', 'trackShareBtn', 'modalMap', 'trackModal', 'trackForm',
         'trackModalTitle', 'trackId', 'trackTitle', 'trackNote', 'trackStartAt', 'trackEndAt',
-        'trackCategory', 'trackGroup',
+        'trackCategory', 'trackGroup', 'trackMode', 'trackModeHint',
         'trackDistance', 'trackDuration', 'trackPoints', 'trackWarning', 'trackCloseBtn',
         'trackCancelBtn', 'closeBtn', 'cancelBtn', 'resolveBtn', 'toast', 'toastText',
         'toastAction', 'grabber', 'fitBtn', 'locateBtn'
@@ -2278,6 +2485,8 @@ exports.OpenLocationCode = OpenLocationCode;
 
       let trackingTimer = null;
       let trackingBusy = false;
+      let trackingProfile = null;      // actief snelheidsprofiel
+      let smoothedSpeedKmh = 0;        // afgevlakte snelheid (EMA)
       let coordinateChangeTimer = null;
       let lastBackupAt = 0;
       let lastResolvedCoords = null;
@@ -2611,7 +2820,7 @@ exports.OpenLocationCode = OpenLocationCode;
           : null;
         els.toast.classList.add('show');
         clearTimeout(toastTimer);
-        toastTimer = setTimeout(hideToast, actionLabel ? UNDO_WINDOW_MS : 2000);
+        toastTimer = setTimeout(hideToast, actionLabel ? UNDO_WINDOW_MS : CONFIG.ui.toastMs);
       }
 
       function hideToast() {
@@ -2646,7 +2855,7 @@ exports.OpenLocationCode = OpenLocationCode;
         attributionControl: true,
         preferCanvas: true,
         tap: true,
-        zoomSnap: 0.5,
+        zoomSnap: CONFIG.map.zoomSnap,
         maxBoundsViscosity: 0.8
       }).setView(DEFAULT_CENTER, DEFAULT_ZOOM);
 
@@ -2732,10 +2941,10 @@ exports.OpenLocationCode = OpenLocationCode;
         toast(`Kaartlaag: ${basemap().name}.`);
       }
 
-      const trackRenderer = L.canvas({ tolerance: 12, padding: 0.4 });
+      const trackRenderer = L.canvas({ tolerance: CONFIG.map.canvasTolerance, padding: 0.4 });
 
-      const TRACK_STYLE = { color: '#0a84ff', weight: 5, opacity: .85, renderer: trackRenderer };
-      const ACTIVE_TRACK_STYLE = { color: '#ff3b30', weight: 6, opacity: .95, renderer: trackRenderer };
+      const TRACK_STYLE = { color: CONFIG.tracks.colorSaved, weight: CONFIG.tracks.weights[0].weight, opacity: CONFIG.tracks.opacitySaved, renderer: trackRenderer };
+      const ACTIVE_TRACK_STYLE = { color: CONFIG.tracks.colorActive, weight: CONFIG.tracks.weights[0].weight + 1, opacity: CONFIG.tracks.opacityActive, renderer: trackRenderer };
 
       const pinSvg = (w, h) =>
         `<svg viewBox="0 0 26 34" width="${w}" height="${h}" aria-hidden="true">` +
@@ -2751,23 +2960,8 @@ exports.OpenLocationCode = OpenLocationCode;
        * views get a compact pin, and from country scale down only position
        * matters, so a dot carries it.
        * ------------------------------------------------------------------ */
-      const MARKER_TIERS = [
-        { minZoom: 14, kind: 'pin', size: [26, 34], emoji: 19 },  // street & town
-        { minZoom: 11, kind: 'pin', size: [21, 28], emoji: 15 },  // city & region
-        { minZoom: 8,  kind: 'dot', size: 13 },                   // province
-        { minZoom: 5,  kind: 'dot', size: 11 },                   // country
-        { minZoom: 0,  kind: 'dot', size: 9 }                     // continent & world
-      ];
-      // Zoomed out a hairline reads as noise, so the connector keeps a floor
-      // and its dash grows with it, staying as legible as the track lines.
-      const TRACK_WEIGHTS = [
-        { minZoom: 15, weight: 6, connector: 2, dash: '2 7' },
-        { minZoom: 12, weight: 5, connector: 2, dash: '2 7' },
-        { minZoom: 9,  weight: 5, connector: 3, dash: '3 8' },
-        { minZoom: 6,  weight: 4, connector: 3, dash: '3 9' },
-        { minZoom: 0,  weight: 3, connector: 3, dash: '4 10' }
-      ];
-
+      const MARKER_TIERS = CONFIG.markers.tiers;
+      const TRACK_WEIGHTS = CONFIG.tracks.weights;
       const tierFor = (zoom) => MARKER_TIERS.find(tier => zoom >= tier.minZoom) || MARKER_TIERS.at(-1);
       const stepFor = (zoom) => TRACK_WEIGHTS.find(step => zoom >= step.minZoom) || TRACK_WEIGHTS.at(-1);
       const weightFor = (zoom) => stepFor(zoom).weight;
@@ -2876,7 +3070,7 @@ exports.OpenLocationCode = OpenLocationCode;
       // the top of the map, so framing is padded in pixels rather than degrees.
       // The toolbar grows with the safe-area inset on notched phones, so its
       // real height is measured instead of assumed.
-      const PIN_HEIGHT = 34;
+      const PIN_HEIGHT = CONFIG.markers.pinHeight;
       const toolbarEl = document.querySelector('.toolbar');
       function fitPadding() {
         const mapTop = map.getContainer().getBoundingClientRect().top;
@@ -2887,12 +3081,12 @@ exports.OpenLocationCode = OpenLocationCode;
           ? Math.ceil(bar.bottom - mapTop) + PIN_HEIGHT + 6
           : PIN_HEIGHT + 14;
         // A short map pane would otherwise be almost all padding.
-        const top = Math.min(Math.round(map.getSize().y * 0.4), Math.max(PIN_HEIGHT + 14, wanted));
-        return { paddingTopLeft: [30, top], paddingBottomRight: [30, 24] };
+        const top = Math.min(Math.round(map.getSize().y * CONFIG.map.fitPaddingTopShare), Math.max(PIN_HEIGHT + 14, wanted));
+        return { paddingTopLeft: [CONFIG.map.fitPaddingX, top], paddingBottomRight: [CONFIG.map.fitPaddingX, CONFIG.map.fitPaddingBottom] };
       }
 
 
-      function pauseAutoFollow(milliseconds = 30000) {
+      function pauseAutoFollow(milliseconds = CONFIG.map.autoFollowPauseMs) {
         autoFollowPausedUntil = Math.max(autoFollowPausedUntil, Date.now() + milliseconds);
       }
 
@@ -2905,7 +3099,7 @@ exports.OpenLocationCode = OpenLocationCode;
         const points = (track.points || []).filter(p => validCoords(Number(p.lat), Number(p.lng)));
         points.forEach((point, index) => {
           const previous = points[index - 1];
-          const timedGap = previous && new Date(point.time) - new Date(previous.time) > GAP_THRESHOLD_MS;
+          const timedGap = previous && new Date(point.time) - new Date(previous.time) > CONFIG.tracking.gapThresholdMs;
           if (index === 0 || point.breakBefore || timedGap) {
             if (current.length) segments.push(current);
             current = [];
@@ -2922,7 +3116,7 @@ exports.OpenLocationCode = OpenLocationCode;
         let gaps = 0;
         for (let i = 1; i < points.length; i++) {
           const gap = points[i].breakBefore ||
-            new Date(points[i].time) - new Date(points[i - 1].time) > GAP_THRESHOLD_MS;
+            new Date(points[i].time) - new Date(points[i - 1].time) > CONFIG.tracking.gapThresholdMs;
           if (gap) gaps++;
           else distance += distanceMetres(points[i - 1], points[i]);
         }
@@ -2933,7 +3127,13 @@ exports.OpenLocationCode = OpenLocationCode;
 
       function trackSummary(track) {
         const stats = trackStats(track);
-        return `${formatDistance(stats.distance)} · ${formatDuration(stats.durationMs)} · ${stats.points} punten` +
+        // Bij een lopende opname staat vooraan welk profiel nu geldt, zodat
+        // zichtbaar is hoe fijn er wordt vastgelegd.
+        const profile = track.active ? profileById(track.profile) : null;
+        const prefix = profile
+          ? `${profile.icon} ${profile.label} (${profile.minMoveM} m) · `
+          : '';
+        return prefix + `${formatDistance(stats.distance)} · ${formatDuration(stats.durationMs)} · ${stats.points} punten` +
           (stats.gaps ? ` · ${stats.gaps} onderbreking${stats.gaps === 1 ? '' : 'en'}` : '');
       }
 
@@ -3164,7 +3364,7 @@ exports.OpenLocationCode = OpenLocationCode;
           const line = L.polyline(points, {
             color: groupColor(name),
             weight: trackStep.connector,
-            opacity: .85,
+            opacity: CONFIG.tracks.connectorOpacity,
             dashArray: trackStep.dash,
             interactive: false,
             renderer: trackRenderer
@@ -3198,6 +3398,12 @@ exports.OpenLocationCode = OpenLocationCode;
         } else {
           activeTrackSegment.addLatLng(latlng);
         }
+        updateActiveTrackRow();
+      }
+
+      // Alleen de samenvattingsregel van de lopende track bijwerken.
+      function updateActiveTrackRow() {
+        if (!activeTrack) return;
         const row = els.items.querySelector(`.item[data-id="${CSS.escape(String(activeTrack.id))}"] [data-role="summary"]`);
         if (row) row.textContent = trackSummary(activeTrack);
         else render();
@@ -3236,8 +3442,8 @@ exports.OpenLocationCode = OpenLocationCode;
         });
 
         const restyle = (group, style, on) => group?.eachLayer(layer => layer.setStyle && layer.setStyle(
-          on ? { weight: scaledWeight(style) + 4, opacity: 1, color: '#ff9500' }
-             : { weight: scaledWeight(style), opacity: active ? style.opacity * .35 : style.opacity, color: style.color }));
+          on ? { weight: scaledWeight(style) + CONFIG.tracks.selectedExtraWeight, opacity: 1, color: CONFIG.tracks.colorSelected }
+             : { weight: scaledWeight(style), opacity: active ? style.opacity * CONFIG.tracks.dimFactor : style.opacity, color: style.color }));
         trackLayers.forEach((entry, id) => restyle(entry.group, TRACK_STYLE, isSelected(id)));
         if (activeTrack) restyle(activeTrackLayer, ACTIVE_TRACK_STYLE, isSelected(activeTrack.id));
 
@@ -3298,14 +3504,14 @@ exports.OpenLocationCode = OpenLocationCode;
       function fitSelection() {
         const bounds = selectionBounds();
         if (!bounds) return false;
-        pauseAutoFollow(60000);
+        pauseAutoFollow(CONFIG.map.autoFollowLongPauseMs);
         // Tapping several items in quick succession would otherwise leave the
         // map on the first fit: Leaflet ignores a move issued mid-animation.
         map.stop();
         if (bounds.getNorthEast().equals(bounds.getSouthWest())) {
-          map.setView(bounds.getCenter(), Math.max(map.getZoom(), 16), { animate: true });
+          map.setView(bounds.getCenter(), Math.max(map.getZoom(), CONFIG.map.singleItemZoom), { animate: true });
         } else {
-          map.fitBounds(bounds, { ...fitPadding(), maxZoom: 17, animate: true });
+          map.fitBounds(bounds, { ...fitPadding(), maxZoom: CONFIG.map.fitMaxZoom, animate: true });
         }
         return true;
       }
@@ -3331,7 +3537,7 @@ exports.OpenLocationCode = OpenLocationCode;
         selection.clear();
         selection.add(key);
         lastItemInteractionAt = Date.now();
-        pauseAutoFollow(60000);
+        pauseAutoFollow(CONFIG.map.autoFollowLongPauseMs);
         map.stop();
         applySelectionStyles();
 
@@ -3342,12 +3548,12 @@ exports.OpenLocationCode = OpenLocationCode;
 
         if (isTrack(item)) {
           const bounds = layerBoundsFor(key);
-          if (bounds) map.fitBounds(bounds, { ...fitPadding(), maxZoom: 17, animate: true });
+          if (bounds) map.fitBounds(bounds, { ...fitPadding(), maxZoom: CONFIG.map.fitMaxZoom, animate: true });
           else toast('Deze track heeft nog geen GPS-punten.');
           return;
         }
 
-        map.setView([item.lat, item.lng], Math.max(map.getZoom(), 16), { animate: true });
+        map.setView([item.lat, item.lng], Math.max(map.getZoom(), CONFIG.map.singleItemZoom), { animate: true });
         markers.get(key)?.marker.openPopup();
       }
 
@@ -3392,9 +3598,9 @@ exports.OpenLocationCode = OpenLocationCode;
         }
         for (const p of activeTrack?.points || []) coordinates.push([p.lat, p.lng]);
         if (!coordinates.length) return false;
-        pauseAutoFollow(60000);
+        pauseAutoFollow(CONFIG.map.autoFollowLongPauseMs);
         map.stop();
-        map.fitBounds(L.latLngBounds(coordinates), { ...fitPadding(), maxZoom: 16 });
+        map.fitBounds(L.latLngBounds(coordinates), { ...fitPadding(), maxZoom: CONFIG.map.fitAllMaxZoom });
         return true;
       }
 
@@ -3536,7 +3742,7 @@ exports.OpenLocationCode = OpenLocationCode;
           .sort((a, b) => a.localeCompare(b));
         fillDatalist(els.groupOptions, collect(item => item.group));
         const used = collect(item => item.category);
-        const merged = [...DEFAULT_CATEGORIES];
+        const merged = [...CONFIG.ui.categories];
         for (const value of used) {
           if (!merged.some(existing => existing.toLowerCase() === value.toLowerCase())) merged.push(value);
         }
@@ -3545,7 +3751,7 @@ exports.OpenLocationCode = OpenLocationCode;
 
       function serializeTrackForm() {
         return JSON.stringify([els.trackId.value, els.trackTitle.value, els.trackNote.value,
-          els.trackCategory.value, els.trackGroup.value,
+          els.trackCategory.value, els.trackGroup.value, els.trackMode.value,
           els.trackStartAt.value, els.trackEndAt.value]);
       }
 
@@ -3554,7 +3760,7 @@ exports.OpenLocationCode = OpenLocationCode;
           modalMap = L.map('modalMap', { zoomControl: true, attributionControl: false, preferCanvas: true });
           modalBaseLayer = createTileLayer({ keepBuffer: 1 }).addTo(modalMap);
           modalMap.on('click', async event => {
-            pauseAutoFollow(60000);
+            pauseAutoFollow(CONFIG.map.autoFollowLongPauseMs);
             setCoords(event.latlng.lat, event.latlng.lng);
             modalMapMarker?.setLatLng(event.latlng);
             await reverseGeocode(event.latlng.lat, event.latlng.lng, false);
@@ -3568,7 +3774,7 @@ exports.OpenLocationCode = OpenLocationCode;
         ensureModalMap(lat, lng);
         if (modalMapMarker) modalMap.removeLayer(modalMapMarker);
         modalMapMarker = L.marker([lat, lng], { draggable: true, icon: iconFor({ title: '' }, MARKER_TIERS[0]) }).addTo(modalMap);
-        modalMapMarker.on('dragstart', () => pauseAutoFollow(60000));
+        modalMapMarker.on('dragstart', () => pauseAutoFollow(CONFIG.map.autoFollowLongPauseMs));
         modalMapMarker.on('dragend', async () => {
           const pos = modalMapMarker.getLatLng();
           setCoords(pos.lat, pos.lng);
@@ -3687,7 +3893,7 @@ exports.OpenLocationCode = OpenLocationCode;
       /* ------------------------------------------------------------------ *
        * Geocoding
        * ------------------------------------------------------------------ */
-      async function fetchJson(url, timeoutMs = 10000) {
+      async function fetchJson(url, timeoutMs = CONFIG.geocoding.timeoutMs) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         try {
@@ -3840,7 +4046,7 @@ exports.OpenLocationCode = OpenLocationCode;
           toast('Geen geldige latitude/longitude gevonden.');
           return false;
         }
-        pauseAutoFollow(60000);
+        pauseAutoFollow(CONFIG.map.autoFollowLongPauseMs);
         setCoords(pair.lat, pair.lng);
         if (modalMapMarker) modalMapMarker.setLatLng([pair.lat, pair.lng]);
         else createDraftMarker(pair.lat, pair.lng);
@@ -3913,7 +4119,7 @@ exports.OpenLocationCode = OpenLocationCode;
         }, []);
       }
 
-      async function searchAddressProviders(query, limit = 5) {
+      async function searchAddressProviders(query, limit = CONFIG.geocoding.searchLimit) {
         const results = [];
         const locale = (navigator.language || 'en').split('-')[0];
 
@@ -4038,7 +4244,7 @@ exports.OpenLocationCode = OpenLocationCode;
 
       async function applySearchResult(result) {
         const pair = { lat: Number(result.lat), lng: Number(result.lng) };
-        pauseAutoFollow(90000);
+        pauseAutoFollow(CONFIG.map.autoFollowLongPauseMs * 1.5);
         setCoords(pair.lat, pair.lng);
         if (modalMapMarker) modalMapMarker.setLatLng([pair.lat, pair.lng]);
         else createDraftMarker(pair.lat, pair.lng);
@@ -4068,7 +4274,7 @@ exports.OpenLocationCode = OpenLocationCode;
         const query = els.placeSearch.value.trim();
         if (!query) { els.placeSearch.focus(); return; }
 
-        pauseAutoFollow(90000);
+        pauseAutoFollow(CONFIG.map.autoFollowLongPauseMs * 1.5);
         els.placeSearchBtn.disabled = true;
         els.placeSearchBtn.textContent = '…';
         hideSearchResults();
@@ -4094,7 +4300,7 @@ exports.OpenLocationCode = OpenLocationCode;
             return;
           }
 
-          const results = await searchAddressProviders(query, 5);
+          const results = await searchAddressProviders(query, CONFIG.geocoding.searchLimit);
           if (!results.length) {
             showSearchStatus('Geen resultaat. Photon en Nominatim zijn geprobeerd.');
             toast('Geen locatie gevonden.');
@@ -4126,13 +4332,13 @@ exports.OpenLocationCode = OpenLocationCode;
           modalMapMarker?.setLatLng([lat, lng]);
           modalMap?.panTo([lat, lng]);
           await reverseGeocode(lat, lng, false);
-        }, 650);
+        }, CONFIG.geocoding.coordinateDebounceMs);
       }
       els.lat.addEventListener('change', coordinateFieldChanged);
       els.lng.addEventListener('change', coordinateFieldChanged);
 
       function useCurrentLocationInModal() {
-        pauseAutoFollow(60000);
+        pauseAutoFollow(CONFIG.map.autoFollowLongPauseMs);
         if (!navigator.geolocation) { toast('Locatiebepaling is niet beschikbaar.'); return; }
         els.modalLocateBtn.disabled = true;
         navigator.geolocation.getCurrentPosition(async position => {
@@ -4146,7 +4352,7 @@ exports.OpenLocationCode = OpenLocationCode;
         }, () => {
           els.modalLocateBtn.disabled = false;
           toast('Huidige locatie kon niet worden opgehaald.');
-        }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 });
+        }, { enableHighAccuracy: true, timeout: CONFIG.map.locateTimeoutMs, maximumAge: 0 });
       }
       els.modalLocateBtn.addEventListener('click', useCurrentLocationInModal);
 
@@ -4277,7 +4483,7 @@ exports.OpenLocationCode = OpenLocationCode;
           image.onload = () => resolve(image);
           image.onerror = () => resolve(null);
           image.src = src;
-          setTimeout(() => resolve(image.complete ? image : null), 8000);
+          setTimeout(() => resolve(image.complete ? image : null), CONFIG.export.tileTimeoutMs);
         });
       }
 
@@ -4340,8 +4546,8 @@ exports.OpenLocationCode = OpenLocationCode;
         const cost = (index, slot) => {
           const box = boxes[index];
           const rect = { x: slot.x, y: slot.y, w: box.w, h: box.h };
-          let total = outside(rect) * 3;
-          for (const obstacle of obstacles) total += boxOverlap(rect, obstacle) * 1.6;
+          let total = outside(rect) * CONFIG.export.outsideWeight;
+          for (const obstacle of obstacles) total += boxOverlap(rect, obstacle) * CONFIG.export.obstacleWeight;
           for (let other = 0; other < boxes.length; other++) {
             if (other === index || !placed[other]) continue;
             total += boxOverlap(rect, { ...placed[other], w: boxes[other].w, h: boxes[other].h });
@@ -4362,7 +4568,7 @@ exports.OpenLocationCode = OpenLocationCode;
           let best = null;
           let bestCost = Infinity;
           slots[index].forEach((slot, rank) => {
-            const value = cost(index, slot) + rank * 0.5;   // ties prefer the canonical slot
+            const value = cost(index, slot) + rank * CONFIG.export.slotPenalty;   // ties prefer the canonical slot
             if (value < bestCost) { bestCost = value; best = slot; }
           });
           return { slot: best, cost: bestCost };
@@ -4371,7 +4577,7 @@ exports.OpenLocationCode = OpenLocationCode;
         for (const { index } of order) placed[index] = bestSlot(index).slot;
 
         // Local search: re-place each label knowing where the others ended up.
-        for (let pass = 0; pass < 3; pass++) {
+        for (let pass = 0; pass < CONFIG.export.searchPasses; pass++) {
           let improved = false;
           for (const { index } of order) {
             const current = placed[index];
@@ -4391,7 +4597,7 @@ exports.OpenLocationCode = OpenLocationCode;
           const residual = cost(index, slot);
           placed[index] = slot;
           const area = boxes[index].w * boxes[index].h;
-          return residual > area * 0.75 ? null : slot;
+          return residual > area * CONFIG.export.labelDropRatio ? null : slot;
         });
       }
 
@@ -4409,8 +4615,8 @@ exports.OpenLocationCode = OpenLocationCode;
         const bounds = selectionBounds();
         if (!bounds) return null;
 
-        const size = 1024;
-        const padding = 90;
+        const size = CONFIG.export.size;
+        const padding = CONFIG.export.padding;
         const crs = map.options.crs;
         const zoom = bounds.getNorthEast().equals(bounds.getSouthWest())
           ? Math.min(16, map.getZoom())
@@ -4429,7 +4635,7 @@ exports.OpenLocationCode = OpenLocationCode;
         // Tiles come from the chosen basemap. crossOrigin is set and every
         // source sends CORS headers, so the canvas stays exportable.
         const config = basemap();
-        const tileSize = 256;
+        const tileSize = CONFIG.export.tileSize;
         const count = Math.pow(2, zoom);
         const jobs = [];
         for (let x = Math.floor(origin.x / tileSize); x <= Math.floor((origin.x + size) / tileSize); x++) {
@@ -4551,8 +4757,9 @@ exports.OpenLocationCode = OpenLocationCode;
         });
 
         // Labels are placed by search, not by a fixed offset.
-        const fontSize = waypoints.length > 8 ? 13 : 15;
-        const maxChars = waypoints.length > 8 ? 20 : 26;
+        const dense = waypoints.length > CONFIG.export.denseThreshold;
+        const fontSize = dense ? CONFIG.export.labelFontSizeDense : CONFIG.export.labelFontSize;
+        const maxChars = dense ? CONFIG.export.labelMaxCharsDense : CONFIG.export.labelMaxChars;
         ctx.font = `bold ${fontSize}px -apple-system, system-ui, sans-serif`;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
@@ -4720,9 +4927,105 @@ exports.OpenLocationCode = OpenLocationCode;
         els.recordBtn.title = label;
       }
 
+      /* ------------------------------------------------------------------ *
+       * Adaptieve bemonstering
+       *
+       * De drempel volgt de snelheid. Voor lopen tot snelweg blijkt de tabel
+       * van de gebruiker één regel te zijn: 5 m bij 5 km/u, 50 m bij 50 km/u
+       * en 100 m bij 100 km/u is telkens afstand = snelheid × 3,6 s, dus een
+       * punt per ~3,6 seconde afgelegde weg. Vliegen wijkt daar bewust van af
+       * (1 km) omdat de lijn dan toch recht is. Daarom is het geen formule
+       * maar een tabel met profielen: die houdt beide regimes leesbaar én
+       * aanpasbaar in het register.
+       *
+       * Keuze van het profiel: de gemeten snelheid gaat door een exponentieel
+       * voortschrijdend gemiddelde (ruis eruit), en rond elke profielgrens
+       * ligt een hysteresemarge zodat het profiel niet heen en weer springt
+       * bij bijvoorbeeld 69-71 km/u.
+       * ------------------------------------------------------------------ */
+      const trackingProfiles = () => CONFIG.tracking.profiles;
+      const profileById = (id) => trackingProfiles().find(profile => profile.id === id) || null;
+
+      function profileLowerBound(profile) {
+        const list = trackingProfiles();
+        const index = list.indexOf(profile);
+        return index > 0 ? list[index - 1].maxSpeedKmh : 0;
+      }
+
+      function profileForSpeed(speedKmh) {
+        const list = trackingProfiles();
+        const margin = CONFIG.tracking.hysteresis;
+        // Blijf in het huidige profiel zolang de snelheid binnen de marge valt.
+        if (trackingProfile && list.includes(trackingProfile)) {
+          const upper = trackingProfile.maxSpeedKmh;
+          const lower = profileLowerBound(trackingProfile);
+          if (speedKmh <= upper * (1 + margin) && speedKmh >= lower * (1 - margin)) return trackingProfile;
+        }
+        return list.find(profile => speedKmh <= profile.maxSpeedKmh) || list.at(-1);
+      }
+
+      // GPS levert vaak zelf een snelheid; zo niet, dan uit de afgelegde weg.
+      function measuredSpeedKmh(coords, previous, time) {
+        if (Number.isFinite(coords.speed) && coords.speed >= 0) return coords.speed * 3.6;
+        if (!previous) return 0;
+        const seconds = (new Date(time) - new Date(previous.time)) / 1000;
+        if (seconds <= 0) return 0;
+        return distanceMetres(previous, { lat: coords.latitude, lng: coords.longitude }) / seconds * 3.6;
+      }
+
+      function activeProfile() {
+        const mode = activeTrack?.trackingMode || CONFIG.tracking.defaultMode;
+        if (mode !== 'auto') return profileById(mode) || trackingProfiles().at(-1);
+        return trackingProfile || profileById('stationary') || trackingProfiles()[0];
+      }
+
+      function updateTrackingProfile(speedKmh) {
+        const alpha = CONFIG.tracking.speedSmoothing;
+        smoothedSpeedKmh = alpha * speedKmh + (1 - alpha) * smoothedSpeedKmh;
+
+        const mode = activeTrack?.trackingMode || CONFIG.tracking.defaultMode;
+        const chosen = mode === 'auto' ? profileForSpeed(smoothedSpeedKmh) : profileById(mode) || trackingProfiles().at(-1);
+        if (chosen === trackingProfile) return false;
+
+        trackingProfile = chosen;
+        if (activeTrack) {
+          activeTrack.profile = chosen.id;
+          activeTrack.events.push({
+            time: new Date().toISOString(),
+            type: 'profile',
+            profile: chosen.id,
+            speedKmh: Math.round(smoothedSpeedKmh)
+          });
+        }
+        return true;   // de bemonsteringsfrequentie moet mee veranderen
+      }
+
+      /**
+       * Beslist of een fix een nieuw trackpunt wordt.
+       * Stilstaan is een apart regime: binnen de straal hoogstens één punt per
+       * interval, zodat een nacht op een parkeerplaats geen duizend punten
+       * oplevert maar wel aantoonbaar doorloopt.
+       */
+      function acceptsPoint(profile, moved, elapsedMs) {
+        if (!Number.isFinite(moved)) return { accept: true, reason: 'first' };
+        const cfg = CONFIG.tracking;
+        // De straal van 25 m geldt bij stilstaan. Bij lopen is 5 m juist wel
+        // een verplaatsing, dus daar mag deze regel niet overheen.
+        if (profile.id === 'stationary') {
+          if (moved >= cfg.stationaryRadiusM) return { accept: true, reason: 'left-spot' };
+          return elapsedMs >= cfg.stationaryMaxIntervalMs
+            ? { accept: true, reason: 'stationary-heartbeat' }
+            : { accept: false, reason: 'stationary' };
+        }
+        if (moved >= profile.minMoveM) return { accept: true, reason: 'moved' };
+        if (elapsedMs >= profile.maxIntervalMs) return { accept: true, reason: 'heartbeat' };
+        return { accept: false, reason: 'below-threshold' };
+      }
+
       function requestTrackPosition() {
         if (!activeTrack?.active || trackingBusy || !navigator.geolocation) return;
         trackingBusy = true;
+        const cfg = CONFIG.tracking;
         navigator.geolocation.getCurrentPosition(
           position => {
             trackingBusy = false;
@@ -4732,7 +5035,7 @@ exports.OpenLocationCode = OpenLocationCode;
             const previous = activeTrack.points.at(-1);
             const elapsed = previous ? new Date(time) - new Date(previous.time) : 0;
 
-            if (Number.isFinite(c.accuracy) && c.accuracy > MAX_ACCEPTED_ACCURACY_M) {
+            if (Number.isFinite(c.accuracy) && c.accuracy > cfg.maxAccuracyM) {
               activeTrack.pendingGap = true;
               activeTrack.events.push({ time, type: 'poor-accuracy', accuracy: c.accuracy });
               activeTrack.updatedAt = new Date().toISOString();
@@ -4741,10 +5044,17 @@ exports.OpenLocationCode = OpenLocationCode;
             }
 
             const moved = previous ? distanceMetres(previous, { lat: c.latitude, lng: c.longitude }) : Infinity;
-            if (moved < MIN_TRACK_MOVE_M) {
-              activeTrack.events.push({ time, type: 'within-25m', distance: moved });
+            const rescheduled = updateTrackingProfile(measuredSpeedKmh(c, previous, time));
+            const profile = activeProfile();
+            const verdict = acceptsPoint(profile, moved, elapsed);
+
+            if (rescheduled) startTrackingTimer({ restartOnly: true });
+
+            if (!verdict.accept) {
+              activeTrack.events.push({ time, type: verdict.reason, distance: Math.round(moved), profile: profile.id });
               activeTrack.updatedAt = new Date().toISOString();
               saveActiveTrack();
+              updateActiveTrackRow();
               return;
             }
 
@@ -4756,7 +5066,8 @@ exports.OpenLocationCode = OpenLocationCode;
               altitude: c.altitude ?? null,
               speed: c.speed ?? null,
               heading: c.heading ?? null,
-              breakBefore: Boolean(activeTrack.pendingGap || (previous && elapsed > GAP_THRESHOLD_MS))
+              profile: profile.id,
+              breakBefore: Boolean(activeTrack.pendingGap || (previous && elapsed > cfg.gapThresholdMs))
             };
             activeTrack.pendingGap = false;
             activeTrack.points.push(point);
@@ -4773,14 +5084,14 @@ exports.OpenLocationCode = OpenLocationCode;
             saveActiveTrack();
             toast('Geen GPS-fix; de track gaat verder als een nieuw segment.');
           },
-          { enableHighAccuracy: true, timeout: 4500, maximumAge: 1000 }
+          { enableHighAccuracy: true, timeout: cfg.gpsTimeoutMs, maximumAge: cfg.gpsMaximumAgeMs }
         );
       }
 
-      function startTrackingTimer() {
+      function startTrackingTimer({ restartOnly = false } = {}) {
         clearInterval(trackingTimer);
-        requestTrackPosition();
-        trackingTimer = setInterval(requestTrackPosition, TRACK_INTERVAL_MS);
+        if (!restartOnly) requestTrackPosition();
+        trackingTimer = setInterval(requestTrackPosition, activeProfile().sampleMs);
       }
 
       function stopTrackingTimer() {
@@ -4800,6 +5111,8 @@ exports.OpenLocationCode = OpenLocationCode;
           note: '',
           category: '',
           group: lastUsedGroup,
+          trackingMode: CONFIG.tracking.defaultMode,
+          profile: 'stationary',
           startAt: localDateTimeValue(now),
           endAt: '',
           points: [],
@@ -4808,6 +5121,8 @@ exports.OpenLocationCode = OpenLocationCode;
           createdAt: now.toISOString(),
           updatedAt: now.toISOString()
         };
+        trackingProfile = profileById('stationary') || trackingProfiles()[0];
+        smoothedSpeedKmh = 0;
         saveActiveTrack();
         syncActiveTrackLayer(true);
         startTrackingTimer();
@@ -4850,11 +5165,63 @@ exports.OpenLocationCode = OpenLocationCode;
         else startTrack();
       });
 
+      function fillTrackModeOptions() {
+        const options = [{ value: 'auto', text: '⚙︎ Automatisch — volgt de snelheid' }].concat(
+          trackingProfiles().map(profile => ({
+            value: profile.id,
+            text: `${profile.icon} ${profile.label} — punt per ${profile.minMoveM >= 1000
+              ? `${(profile.minMoveM / 1000).toFixed(profile.minMoveM % 1000 ? 1 : 0)} km`
+              : `${profile.minMoveM} m`}`
+          })));
+        els.trackMode.replaceChildren(...options.map(option => {
+          const element = document.createElement('option');
+          element.value = option.value;
+          element.textContent = option.text;
+          return element;
+        }));
+      }
+
+      function describeTrackMode(mode) {
+        const cfg = CONFIG.tracking;
+        if (mode === 'auto') {
+          const detected = profileById(activeTrack?.profile);
+          return `De drempel volgt de gemeten snelheid` +
+            (detected ? `; nu ${detected.icon} ${detected.label} (${detected.minMoveM} m, elke ${Math.round(detected.sampleMs / 1000)} s).` : '.') +
+            ` Stilstaan blijft beperkt tot één punt per ${Math.round(cfg.stationaryMaxIntervalMs / 60000)} minuten binnen ${cfg.stationaryRadiusM} m.`;
+        }
+        const profile = profileById(mode);
+        if (!profile) return '';
+        return `Vast profiel: een punt zodra er ${profile.minMoveM} m is afgelegd, GPS elke ${Math.round(profile.sampleMs / 1000)} s.`;
+      }
+
+      function syncTrackModeHint() {
+        els.trackModeHint.textContent = describeTrackMode(els.trackMode.value);
+      }
+
+      els.trackMode.addEventListener('change', () => {
+        syncTrackModeHint();
+        // Meteen toepassen op een lopende opname: het interval verandert mee.
+        if (activeTrack?.active && String(activeTrack.id) === els.trackId.value) {
+          activeTrack.trackingMode = els.trackMode.value;
+          trackingProfile = els.trackMode.value === 'auto'
+            ? trackingProfile
+            : profileById(els.trackMode.value);
+          if (activeTrack.trackingMode !== 'auto') activeTrack.profile = els.trackMode.value;
+          saveActiveTrack();
+          startTrackingTimer({ restartOnly: true });
+          updateActiveTrackRow();
+        }
+      });
+
       function openTrackModal(track, justFinalized = false) {
         const stats = trackStats(track);
         els.trackId.value = track.id;
         els.trackTitle.value = track.title || 'Opgenomen track';
         els.trackNote.value = track.note || '';
+        fillTrackModeOptions();
+        els.trackMode.value = track.trackingMode || CONFIG.tracking.defaultMode;
+        if (!els.trackMode.value) els.trackMode.value = 'auto';
+        syncTrackModeHint();
         els.trackCategory.value = track.category || '';
         els.trackGroup.value = track.group || lastUsedGroup;
         refreshDatalists();
@@ -4898,6 +5265,7 @@ exports.OpenLocationCode = OpenLocationCode;
         track.note = els.trackNote.value.trim();
         track.category = els.trackCategory.value.trim();
         track.group = els.trackGroup.value.trim();
+        track.trackingMode = els.trackMode.value;
         lastUsedGroup = track.group;
         track.startAt = els.trackStartAt.value;
         track.endAt = els.trackEndAt.value;
@@ -5265,7 +5633,7 @@ exports.OpenLocationCode = OpenLocationCode;
       els.locateBtn.addEventListener('click', () => {
         autoFollowPausedUntil = 0;
         if (lastKnownPosition) {
-          map.setView([lastKnownPosition.lat, lastKnownPosition.lng], Math.max(map.getZoom(), 16));
+          map.setView([lastKnownPosition.lat, lastKnownPosition.lng], Math.max(map.getZoom(), CONFIG.map.singleItemZoom));
           return;
         }
         if (!navigator.geolocation) { toast('Locatiebepaling is niet beschikbaar.'); return; }
@@ -5273,16 +5641,16 @@ exports.OpenLocationCode = OpenLocationCode;
         navigator.geolocation.getCurrentPosition(
           position => { updateCurrentLocation(position); map.setView([position.coords.latitude, position.coords.longitude], 16); },
           () => toast('Huidige locatie kon niet worden opgehaald.'),
-          { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
+          { enableHighAccuracy: true, timeout: CONFIG.map.locateTimeoutMs, maximumAge: 0 }
         );
       });
 
       function installMapInteractionGuard() {
         const container = map.getContainer();
         for (const type of ['pointerdown', 'touchstart', 'wheel']) {
-          container.addEventListener(type, () => pauseAutoFollow(30000), { passive: true });
+          container.addEventListener(type, () => pauseAutoFollow(CONFIG.map.autoFollowPauseMs), { passive: true });
         }
-        container.addEventListener('keydown', () => pauseAutoFollow(30000));
+        container.addEventListener('keydown', () => pauseAutoFollow(CONFIG.map.autoFollowPauseMs));
       }
 
       function updateCurrentLocation(position) {
@@ -5298,7 +5666,7 @@ exports.OpenLocationCode = OpenLocationCode;
         }
 
         const modalOpen = els.modal.classList.contains('open') || els.trackModal.classList.contains('open');
-        const itemIdle = Date.now() - lastItemInteractionAt >= 5000;
+        const itemIdle = Date.now() - lastItemInteractionAt >= CONFIG.map.itemIdleMs;
         const mapIdle = Date.now() >= autoFollowPausedUntil;
         if (!modalOpen && itemIdle && mapIdle && !selection.size) {
           map.panTo([lat, lng], { animate: true, duration: .5 });
@@ -5310,7 +5678,7 @@ exports.OpenLocationCode = OpenLocationCode;
         locationWatchId = navigator.geolocation.watchPosition(
           updateCurrentLocation,
           () => {},
-          { enableHighAccuracy: true, maximumAge: 3000, timeout: 12000 }
+          { enableHighAccuracy: true, maximumAge: 3000, timeout: CONFIG.map.locateTimeoutMs }
         );
       }
 
@@ -5323,7 +5691,7 @@ exports.OpenLocationCode = OpenLocationCode;
       }
 
       function setSplit(fraction, persist = true) {
-        const clamped = Math.min(0.9, Math.max(0.12, fraction));
+        const clamped = Math.min(CONFIG.ui.splitMax, Math.max(CONFIG.ui.splitMin, fraction));
         document.documentElement.style.setProperty('--split', `${(clamped * 100).toFixed(2)}%`);
         if (persist) { try { localStorage.setItem(SPLIT_KEY, String(clamped)); } catch {} }
         map.invalidateSize({ animate: false });
@@ -5338,7 +5706,7 @@ exports.OpenLocationCode = OpenLocationCode;
         let startY = 0;
 
         els.grabber.addEventListener('pointerdown', event => {
-          if (window.innerWidth >= 760) return;
+          if (window.innerWidth >= CONFIG.ui.wideScreenPx) return;
           dragging = true;
           moved = false;
           startY = event.clientY;
@@ -5402,6 +5770,7 @@ exports.OpenLocationCode = OpenLocationCode;
           activeTrack.events.push({ time: new Date().toISOString(), type: 'session-recovered' });
           activeTrack.updatedAt = new Date().toISOString();
           saveActiveTrack();
+          trackingProfile = profileById(activeTrack.profile) || trackingProfiles()[0];
           startTrackingTimer();
           setTimeout(() => toast(recoveredFromDb
             ? 'Lopende track uit de herstelopslag teruggezet en hervat.'
