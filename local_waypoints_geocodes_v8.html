@@ -2251,27 +2251,27 @@ exports.OpenLocationCode = OpenLocationCode;
       const STORAGE_KEY = 'local-waypoints-v1';
 
       const DEFAULT_CONFIG = {
-        /* --- opslag -------------------------------------------------- */
+        /* --- opslag --------------------------------------------------
+         * Reisgegevens staan in IndexedDB. localStorage bevat uitsluitend
+         * instellingen: die zijn klein, mogen verloren gaan en worden bij
+         * het opstarten synchroon gelezen.
+         * -------------------------------------------------------------- */
         storage: {
           key: STORAGE_KEY,
+          dbName: 'local-waypoints',
+          dbVersion: 1,
+          itemStore: 'items',
+          pointStore: 'points',
+          // Uitsluitend instellingen, geen reisgegevens.
           suffixes: {
             config: '-config',
-            backup: '-backup',
-            clearedAt: '-cleared-at',
             split: '-split',
             collapsedGroups: '-collapsed-groups',
             basemap: '-basemap',
             hintSeen: '-hint-seen',
-            refreshBackup: '-refresh-backup',
-            refreshPending: '-refresh-pending',
-            activeTrack: '-active-track',
-            activeTrackBackup: '-active-track-backup',
             what3wordsKey: '-what3words-api-key'
           },
           refreshQueryKey: '_lw_refresh',
-          durableDbName: 'local-waypoints-durable-v1',
-          durableDbStore: 'recovery',
-          backupIntervalMs: 60000,
           undoWindowMs: 12000
         },
 
@@ -2286,6 +2286,11 @@ exports.OpenLocationCode = OpenLocationCode;
           gapThresholdMs: 15000,
           gpsTimeoutMs: 4500,
           gpsMaximumAgeMs: 1000,
+          // Bij de start is de snelheid nog onbekend en staat het profiel op
+          // stilstaan (30 s tussen metingen). Zonder opwarmfase zou wegrijden
+          // pas een halve minuut later worden opgemerkt.
+          warmupMs: 60000,
+          warmupSampleMs: 4000,
           // Exponentieel voortschrijdend gemiddelde over de snelheid: hoger
           // reageert sneller, lager is rustiger. 0 < alpha <= 1.
           speedSmoothing: 0.4,
@@ -2427,22 +2432,13 @@ exports.OpenLocationCode = OpenLocationCode;
 
       const storageKey = (name) => CONFIG.storage.key + CONFIG.storage.suffixes[name];
 
-      const BACKUP_KEY = storageKey('backup');
-      const INTENT_EMPTY_KEY = storageKey('clearedAt');
       const SPLIT_KEY = storageKey('split');
       const COLLAPSED_KEY = storageKey('collapsedGroups');
       const BASEMAP_KEY = storageKey('basemap');
       const HINT_KEY = storageKey('hintSeen');
-      const REFRESH_BACKUP_KEY = storageKey('refreshBackup');
-      const REFRESH_PENDING_KEY = storageKey('refreshPending');
       const REFRESH_QUERY_KEY = CONFIG.storage.refreshQueryKey;
-      const ACTIVE_TRACK_KEY = storageKey('activeTrack');
-      const ACTIVE_TRACK_BACKUP_KEY = storageKey('activeTrackBackup');
       const W3W_API_KEY_KEY = storageKey('what3wordsKey');
 
-      const TRACK_DB_NAME = CONFIG.storage.durableDbName;
-      const TRACK_DB_STORE = CONFIG.storage.durableDbStore;
-      const BACKUP_INTERVAL_MS = CONFIG.storage.backupIntervalMs;
       const UNDO_WINDOW_MS = CONFIG.storage.undoWindowMs;
 
       const DEFAULT_CENTER = CONFIG.map.defaultCenter;
@@ -2486,9 +2482,9 @@ exports.OpenLocationCode = OpenLocationCode;
       let trackingTimer = null;
       let trackingBusy = false;
       let trackingProfile = null;      // actief snelheidsprofiel
+      let currentIntervalMs = 0;       // actief bemonsteringsinterval
       let smoothedSpeedKmh = 0;        // afgevlakte snelheid (EMA)
       let coordinateChangeTimer = null;
-      let lastBackupAt = 0;
       let lastResolvedCoords = null;
       let waypointFormBaseline = '';
       let trackFormBaseline = '';
@@ -2504,6 +2500,16 @@ exports.OpenLocationCode = OpenLocationCode;
       /* ------------------------------------------------------------------ *
        * Storage - never drop local data without an explicit user action
        * ------------------------------------------------------------------ */
+      /* ------------------------------------------------------------------ *
+       * Opslag
+       *
+       * Alle reisgegevens staan in IndexedDB; localStorage bewaart alleen
+       * instellingen. Trackpunten liggen in een eigen store met sleutel
+       * [trackId, volgnummer], zodat een nieuw punt tijdens een opname één
+       * kleine append is in plaats van een herschrijving van de hele track.
+       * Bij 5000 punten scheelt dat het verschil tussen ~25 ms en <1 ms per
+       * punt, en het houdt de opslag ver onder de limiet van localStorage.
+       * ------------------------------------------------------------------ */
       function readJson(key) {
         try {
           const raw = localStorage.getItem(key);
@@ -2517,87 +2523,26 @@ exports.OpenLocationCode = OpenLocationCode;
         try {
           localStorage.setItem(key, JSON.stringify(value));
           return true;
-        } catch (error) {
-          const full = /quota|exceeded|full/i.test(String(error && error.name) + String(error && error.message));
-          toast(full ? 'Opslag is vol. Exporteer en verwijder oude tracks.' : 'Opslaan in deze browser is geblokkeerd.');
-          return false;
+        } catch {
+          return false;   // instellingen zijn niet kritiek genoeg voor een melding
         }
       }
 
-      function readBackup() {
-        const parsed = readJson(BACKUP_KEY) || readJson(REFRESH_BACKUP_KEY);
-        return parsed && Array.isArray(parsed.items) ? parsed : null;
-      }
+      let db = null;
 
-      function writeBackup(force = false) {
-        const now = Date.now();
-        if (!force && now - lastBackupAt < BACKUP_INTERVAL_MS) return;
-        lastBackupAt = now;
-        writeJson(BACKUP_KEY, { savedAt: new Date().toISOString(), items, activeTrack });
-      }
-
-      // Called before anything that shrinks or replaces the list.
-      function snapshot() {
-        return { items: items.slice(), activeTrack: activeTrack ? structuredClone(activeTrack) : null };
-      }
-
-      function markIntentionallyEmpty() {
-        try { localStorage.setItem(INTENT_EMPTY_KEY, new Date().toISOString()); } catch {}
-      }
-
-      function loadItems() {
-        const stored = readJson(STORAGE_KEY);
-        let parsed = Array.isArray(stored) ? stored : [];
-
-        // Recover when the primary key is missing, unreadable or was emptied by
-        // a reload/import glitch. An intentional "delete everything" is recorded
-        // in INTENT_EMPTY_KEY so a deliberate empty list is never resurrected.
-        if (!parsed.length) {
-          const backup = readBackup();
-          const clearedAt = localStorage.getItem(INTENT_EMPTY_KEY);
-          const backupIsNewer = !clearedAt || new Date(backup?.savedAt || 0) > new Date(clearedAt);
-          if (backup?.items?.length && backupIsNewer) {
-            parsed = backup.items;
-            writeJson(STORAGE_KEY, parsed);
-            setTimeout(() => toast(`${parsed.length} items hersteld uit de lokale backup.`), 400);
-          }
-        }
-        return parsed;
-      }
-
-      function saveItems({ backup = true } = {}) {
-        const ok = writeJson(STORAGE_KEY, items);
-        if (ok && backup) writeBackup(items.length === 0);
-        if (!items.length) markIntentionallyEmpty();
-        return ok;
-      }
-
-      function validTrackSnapshot(value) {
-        return Boolean(value) && value.type === 'track' && Array.isArray(value.points);
-      }
-
-      function newestTrackSnapshot(candidates) {
-        return candidates.filter(validTrackSnapshot).sort((a, b) => {
-          if (b.points.length !== a.points.length) return b.points.length - a.points.length;
-          return new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0);
-        })[0] || null;
-      }
-
-      function loadActiveTrack() {
-        return newestTrackSnapshot([
-          readJson(ACTIVE_TRACK_KEY),
-          readJson(ACTIVE_TRACK_BACKUP_KEY),
-          readBackup()?.activeTrack || null
-        ]);
-      }
-
-      function openTrackRecoveryDb() {
+      function openDatabase() {
         return new Promise((resolve, reject) => {
-          if (!('indexedDB' in window)) return reject(new Error('IndexedDB unavailable'));
-          const request = indexedDB.open(TRACK_DB_NAME, 1);
+          if (!('indexedDB' in window)) return reject(new Error('IndexedDB is niet beschikbaar'));
+          const request = indexedDB.open(CONFIG.storage.dbName, CONFIG.storage.dbVersion);
           request.onupgradeneeded = () => {
-            if (!request.result.objectStoreNames.contains(TRACK_DB_STORE)) {
-              request.result.createObjectStore(TRACK_DB_STORE);
+            const database = request.result;
+            if (!database.objectStoreNames.contains(CONFIG.storage.itemStore)) {
+              database.createObjectStore(CONFIG.storage.itemStore, { keyPath: 'id' });
+            }
+            if (!database.objectStoreNames.contains(CONFIG.storage.pointStore)) {
+              // Samengestelde sleutel: punten van één track liggen aaneengesloten
+              // en komen in de opgenomen volgorde terug.
+              database.createObjectStore(CONFIG.storage.pointStore, { keyPath: ['trackId', 'seq'] });
             }
           };
           request.onsuccess = () => resolve(request.result);
@@ -2605,70 +2550,194 @@ exports.OpenLocationCode = OpenLocationCode;
         });
       }
 
-      async function writeTrackRecoveryDb(track) {
+      function tx(stores, mode) {
+        const transaction = db.transaction(stores, mode);
+        return {
+          transaction,
+          store: (name) => transaction.objectStore(name),
+          done: new Promise((resolve, reject) => {
+            transaction.oncomplete = resolve;
+            transaction.onerror = () => reject(transaction.error);
+            transaction.onabort = () => reject(transaction.error);
+          })
+        };
+      }
+
+      const requestResult = (request) => new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+
+      function reportStorageError(error) {
+        console.error('Opslagfout', error);
+        const full = /quota|exceeded|full/i.test(String(error?.name) + String(error?.message));
+        toast(full
+          ? 'Opslag is vol. Exporteer en verwijder oude tracks.'
+          : 'Opslaan is mislukt. Exporteer je gegevens voor de zekerheid.');
+      }
+
+      // Een item-record bevat geen punten; die staan in de puntenstore.
+      const itemRecord = (item) => {
+        const { points, ...rest } = item;
+        return isTrack(item) ? { ...rest, pointCount: points?.length || 0 } : rest;
+      };
+
+      const pointRecord = (trackId, point, seq) => ({ ...point, trackId: String(trackId), seq });
+
+      async function loadEverything() {
+        const read = tx([CONFIG.storage.itemStore, CONFIG.storage.pointStore], 'readonly');
+        const [records, points] = await Promise.all([
+          requestResult(read.store(CONFIG.storage.itemStore).getAll()),
+          requestResult(read.store(CONFIG.storage.pointStore).getAll())
+        ]);
+        await read.done;
+
+        const byTrack = new Map();
+        for (const point of points) {
+          if (!byTrack.has(point.trackId)) byTrack.set(point.trackId, []);
+          byTrack.get(point.trackId).push(point);
+        }
+        for (const list of byTrack.values()) list.sort((a, b) => a.seq - b.seq);
+
+        const restored = records.map(record => {
+          if (record.type !== 'track') return record;
+          const list = (byTrack.get(String(record.id)) || []).map(({ trackId, seq, ...point }) => point);
+          return { ...record, points: list };
+        });
+
+        // De invoegvolgorde ligt vast in seq, want IndexedDB geeft op sleutel terug.
+        restored.sort((a, b) => (b.seq || 0) - (a.seq || 0));
+        nextSeq = restored.reduce((max, item) => Math.max(max, item.seq || 0), 0) + 1;
+
+        return {
+          items: restored.filter(item => !item.active),
+          activeTrack: restored.find(item => item.active) || null
+        };
+      }
+
+      // Volgnummer voor de lijstvolgorde: nieuwste bovenaan, net als voorheen.
+      let nextSeq = 1;
+      const withSeq = (item) => (item.seq ? item : { ...item, seq: nextSeq++ });
+
+      async function persistItem(item) {
         try {
-          const db = await openTrackRecoveryDb();
-          await new Promise((resolve, reject) => {
-            const tx = db.transaction(TRACK_DB_STORE, 'readwrite');
-            const store = tx.objectStore(TRACK_DB_STORE);
-            if (track) store.put(track, 'active-track');
-            else store.delete('active-track');
-            tx.oncomplete = resolve;
-            tx.onerror = () => reject(tx.error);
-          });
-          db.close();
-        } catch {
-          // localStorage stays the synchronous fallback.
+          const write = tx([CONFIG.storage.itemStore], 'readwrite');
+          write.store(CONFIG.storage.itemStore).put(itemRecord(item));
+          await write.done;
+          return true;
+        } catch (error) {
+          reportStorageError(error);
+          return false;
         }
       }
 
-      async function readTrackRecoveryDb() {
+      async function persistPoints(trackId, points) {
         try {
-          const db = await openTrackRecoveryDb();
-          const value = await new Promise((resolve, reject) => {
-            const tx = db.transaction(TRACK_DB_STORE, 'readonly');
-            const request = tx.objectStore(TRACK_DB_STORE).get('active-track');
-            request.onsuccess = () => resolve(request.result || null);
-            request.onerror = () => reject(request.error);
-          });
-          db.close();
-          return validTrackSnapshot(value) ? value : null;
-        } catch {
-          return null;
+          const write = tx([CONFIG.storage.pointStore], 'readwrite');
+          const store = write.store(CONFIG.storage.pointStore);
+          points.forEach((point, index) => store.put(pointRecord(trackId, point, index)));
+          await write.done;
+          return true;
+        } catch (error) {
+          reportStorageError(error);
+          return false;
         }
+      }
+
+      // Eén punt toevoegen tijdens een opname: dit is de hete route.
+      async function appendPointToDb(trackId, point, seq) {
+        try {
+          const write = tx([CONFIG.storage.pointStore], 'readwrite');
+          write.store(CONFIG.storage.pointStore).put(pointRecord(trackId, point, seq));
+          await write.done;
+          return true;
+        } catch (error) {
+          reportStorageError(error);
+          return false;
+        }
+      }
+
+      async function removeItemFromDb(id) {
+        try {
+          const write = tx([CONFIG.storage.itemStore, CONFIG.storage.pointStore], 'readwrite');
+          write.store(CONFIG.storage.itemStore).delete(String(id));
+          write.store(CONFIG.storage.pointStore).delete(
+            IDBKeyRange.bound([String(id), 0], [String(id), Number.MAX_SAFE_INTEGER]));
+          await write.done;
+          return true;
+        } catch (error) {
+          reportStorageError(error);
+          return false;
+        }
+      }
+
+      // Alles vervangen: gebruikt bij import-vervangen en bij ongedaan maken.
+      async function replaceAll(list, active = null) {
+        try {
+          const write = tx([CONFIG.storage.itemStore, CONFIG.storage.pointStore], 'readwrite');
+          const itemStore = write.store(CONFIG.storage.itemStore);
+          const pointStore = write.store(CONFIG.storage.pointStore);
+          itemStore.clear();
+          pointStore.clear();
+          for (const item of [...list, ...(active ? [active] : [])]) {
+            itemStore.put(itemRecord(item));
+            if (isTrack(item)) {
+              (item.points || []).forEach((point, index) => pointStore.put(pointRecord(item.id, point, index)));
+            }
+          }
+          await write.done;
+          return true;
+        } catch (error) {
+          reportStorageError(error);
+          return false;
+        }
+      }
+
+      // Meerdere items in één transactie: gebruikt bij import-samenvoegen.
+      async function persistMany(list) {
+        try {
+          const write = tx([CONFIG.storage.itemStore, CONFIG.storage.pointStore], 'readwrite');
+          const itemStore = write.store(CONFIG.storage.itemStore);
+          const pointStore = write.store(CONFIG.storage.pointStore);
+          for (const raw of list) {
+            const item = withSeq(raw);
+            itemStore.put(itemRecord(item));
+            if (isTrack(item)) {
+              pointStore.delete(IDBKeyRange.bound([String(item.id), 0], [String(item.id), Number.MAX_SAFE_INTEGER]));
+              (item.points || []).forEach((point, index) => pointStore.put(pointRecord(item.id, point, index)));
+            }
+          }
+          await write.done;
+          return true;
+        } catch (error) {
+          reportStorageError(error);
+          return false;
+        }
+      }
+
+      function snapshot() {
+        return {
+          items: items.map(item => structuredClone(item)),
+          activeTrack: activeTrack ? structuredClone(activeTrack) : null
+        };
+      }
+
+      // Bewaart de volledige lijst. Alleen gebruiken waar de hele set wijzigt;
+      // losse wijzigingen gaan via persistItem.
+      function saveItems() {
+        void replaceAll(items, activeTrack);
+        return true;
       }
 
       function saveActiveTrack() {
-        try {
-          if (activeTrack) {
-            writeJson(ACTIVE_TRACK_KEY, activeTrack);
-            writeJson(ACTIVE_TRACK_BACKUP_KEY, activeTrack);
-          } else {
-            localStorage.removeItem(ACTIVE_TRACK_KEY);
-            localStorage.removeItem(ACTIVE_TRACK_BACKUP_KEY);
-          }
-        } finally {
-          void writeTrackRecoveryDb(activeTrack ? structuredClone(activeTrack) : null);
-        }
+        if (!activeTrack) return;
+        activeTrack = withSeq(activeTrack);
+        void persistItem(activeTrack);
       }
 
-      async function recoverDurableActiveTrack() {
-        const dbTrack = await readTrackRecoveryDb();
-        const recovered = newestTrackSnapshot([activeTrack, dbTrack]);
-        if (!recovered) return false;
-
-        const changed = !activeTrack ||
-          recovered.points.length > activeTrack.points.length ||
-          new Date(recovered.updatedAt || 0) > new Date(activeTrack.updatedAt || 0);
-
-        activeTrack = recovered;
-        activeTrack.events = Array.isArray(activeTrack.events) ? activeTrack.events : [];
-        activeTrack.pendingGap = true;
-        if (changed) activeTrack.events.push({ time: new Date().toISOString(), type: 'durable-recovery' });
-        saveActiveTrack();
-        return changed;
+      function validTrackSnapshot(value) {
+        return Boolean(value) && value.type === 'track' && Array.isArray(value.points);
       }
-
       /* ------------------------------------------------------------------ *
        * Small helpers
        * ------------------------------------------------------------------ */
@@ -2840,10 +2909,8 @@ exports.OpenLocationCode = OpenLocationCode;
             saveActiveTrack();
           }
           pendingUndo = null;
-          saveItems();
-          writeBackup(true);
+          void replaceAll(items, activeTrack).then(() => toast('Hersteld.'));
           render();
-          toast('Hersteld.');
         });
       }
 
@@ -3647,10 +3714,9 @@ exports.OpenLocationCode = OpenLocationCode;
         if (!item || item.active) return false;
         if (!confirm(`Verwijder “${item.title}”?`)) return false;
         const before = snapshot();
-        writeBackup(true);
         items = items.filter(candidate => String(candidate.id) !== String(item.id));
         selection.delete(String(item.id));
-        saveItems();
+        void removeItemFromDb(item.id);
         render();
         offerUndo(isTrack(item) ? 'Track verwijderd.' : 'Waypoint verwijderd.', before);
         return true;
@@ -3871,11 +3937,11 @@ exports.OpenLocationCode = OpenLocationCode;
           updatedAt: new Date().toISOString()
         };
 
-        if (index >= 0) items[index] = item;
-        else items.unshift(item);
+        if (index >= 0) items[index] = { ...item, seq: previous.seq };
+        else items.unshift(withSeq(item));
 
         lastUsedGroup = item.group;
-        saveItems();
+        void persistItem(items[index >= 0 ? index : 0]);
         waypointFormBaseline = serializeWaypointForm();
         closeModal(true);
         selection.clear();
@@ -5072,6 +5138,8 @@ exports.OpenLocationCode = OpenLocationCode;
             activeTrack.pendingGap = false;
             activeTrack.points.push(point);
             activeTrack.updatedAt = new Date().toISOString();
+            // Eén append voor het punt, één klein record voor de metadata.
+            void appendPointToDb(activeTrack.id, point, activeTrack.points.length - 1);
             saveActiveTrack();
             appendActiveTrackPoint(point);
             if (Date.now() >= autoFollowPausedUntil) map.panTo([point.lat, point.lng], { animate: true });
@@ -5088,10 +5156,24 @@ exports.OpenLocationCode = OpenLocationCode;
         );
       }
 
+      // Het gewenste interval: tijdens de opwarmfase snel, daarna volgens profiel.
+      function sampleIntervalMs() {
+        const cfg = CONFIG.tracking;
+        const started = activeTrack?.startedMs;
+        if (started && Date.now() - started < cfg.warmupMs) return cfg.warmupSampleMs;
+        return activeProfile().sampleMs;
+      }
+
       function startTrackingTimer({ restartOnly = false } = {}) {
         clearInterval(trackingTimer);
         if (!restartOnly) requestTrackPosition();
-        trackingTimer = setInterval(requestTrackPosition, activeProfile().sampleMs);
+        currentIntervalMs = sampleIntervalMs();
+        trackingTimer = setInterval(() => {
+          // Het einde van de opwarmfase verandert het interval zonder dat er
+          // een profielwissel is, dus dat wordt hier opgemerkt.
+          if (sampleIntervalMs() !== currentIntervalMs) { startTrackingTimer({ restartOnly: true }); return; }
+          requestTrackPosition();
+        }, currentIntervalMs);
       }
 
       function stopTrackingTimer() {
@@ -5107,12 +5189,14 @@ exports.OpenLocationCode = OpenLocationCode;
           id: uuid(),
           type: 'track',
           active: true,
+          seq: nextSeq++,
           title: `Track ${dateTimeFormat.format(now)}`,
           note: '',
           category: '',
           group: lastUsedGroup,
           trackingMode: CONFIG.tracking.defaultMode,
           profile: 'stationary',
+          startedMs: Date.now(),
           startAt: localDateTimeValue(now),
           endAt: '',
           points: [],
@@ -5141,7 +5225,7 @@ exports.OpenLocationCode = OpenLocationCode;
         if (!completed.points.length &&
             !confirm('Er zijn geen bruikbare GPS-posities opgenomen. Deze lege track toch bewaren?')) {
           activeTrack = null;
-          saveActiveTrack();
+          void removeItemFromDb(completed.id);
           syncActiveTrackLayer();
           render();
           toast('Lege track verwijderd.');
@@ -5152,8 +5236,7 @@ exports.OpenLocationCode = OpenLocationCode;
         saveActiveTrack();
         syncActiveTrackLayer();
         items.unshift(completed);
-        saveItems();
-        writeBackup(true);
+        void persistItem(completed);
         selection.clear();
         selection.add(String(completed.id));
         render();
@@ -5270,7 +5353,7 @@ exports.OpenLocationCode = OpenLocationCode;
         track.startAt = els.trackStartAt.value;
         track.endAt = els.trackEndAt.value;
         track.updatedAt = new Date().toISOString();
-        if (track.active) saveActiveTrack(); else saveItems();
+        if (track.active) saveActiveTrack(); else void persistItem(track);
         trackFormBaseline = serializeTrackForm();
         closeTrackModal(true);
         render();
@@ -5501,7 +5584,6 @@ exports.OpenLocationCode = OpenLocationCode;
           );
 
           const before = snapshot();
-          writeBackup(true);
 
           if (merge) {
             const byId = new Map(items.map(item => [String(item.id), item]));
@@ -5512,7 +5594,7 @@ exports.OpenLocationCode = OpenLocationCode;
               byId.set(String(item.id), item);
             }
             items = [...byId.values()];
-            saveItems();
+            await persistMany(imported);
             render();
             fitItems();
             toast(`${added} toegevoegd, ${updated} bijgewerkt.`);
@@ -5529,7 +5611,7 @@ exports.OpenLocationCode = OpenLocationCode;
           }
 
           items = imported;
-          saveItems();
+          await replaceAll(items, activeTrack);
           render();
           fitItems();
           offerUndo(`${imported.length} item${imported.length === 1 ? '' : 's'} geïmporteerd.`, before);
@@ -5560,7 +5642,6 @@ exports.OpenLocationCode = OpenLocationCode;
         link.click();
         link.remove();
         setTimeout(() => URL.revokeObjectURL(url), 5000);
-        writeBackup(true);
         toast(`${items.length} item${items.length === 1 ? '' : 's'} geëxporteerd.`);
       });
 
@@ -5568,15 +5649,8 @@ exports.OpenLocationCode = OpenLocationCode;
        * Refresh from server (keeps local data)
        * ------------------------------------------------------------------ */
       async function refreshHtmlFromServer() {
-        saveItems({ backup: false });
+        // De gegevens staan al in IndexedDB; een herlaadbeurt raakt ze niet.
         saveActiveTrack();
-        writeBackup(true);
-        try {
-          writeJson(REFRESH_BACKUP_KEY, { savedAt: new Date().toISOString(), items, activeTrack });
-          sessionStorage.setItem(REFRESH_PENDING_KEY, '1');
-        } catch {
-          // The normal keys were already written above.
-        }
 
         const target = new URL(location.href);
         target.searchParams.set(REFRESH_QUERY_KEY, String(Date.now()));
@@ -5755,15 +5829,22 @@ exports.OpenLocationCode = OpenLocationCode;
       }
 
       async function initializeApp() {
-        items = loadItems();
-        activeTrack = loadActiveTrack();
         requestPersistentStorage();
+        try {
+          db = await openDatabase();
+          const loaded = await loadEverything();
+          items = loaded.items;
+          activeTrack = loaded.activeTrack;
+        } catch (error) {
+          console.error(error);
+          alert('De lokale database kon niet worden geopend. Zonder opslag gaat nieuw werk verloren; '
+            + 'in privénavigatie is IndexedDB soms geblokkeerd.');
+        }
 
         installSplitter();
         installMapInteractionGuard();
         startLocationFollowing();
 
-        const recoveredFromDb = await recoverDurableActiveTrack();
         if (activeTrack?.active) {
           activeTrack.pendingGap = true;
           activeTrack.events = Array.isArray(activeTrack.events) ? activeTrack.events : [];
@@ -5771,17 +5852,16 @@ exports.OpenLocationCode = OpenLocationCode;
           activeTrack.updatedAt = new Date().toISOString();
           saveActiveTrack();
           trackingProfile = profileById(activeTrack.profile) || trackingProfiles()[0];
+          // Na herstel opnieuw kort opwarmen: de snelheid van nu is onbekend.
+          activeTrack.startedMs = Date.now();
           startTrackingTimer();
-          setTimeout(() => toast(recoveredFromDb
-            ? 'Lopende track uit de herstelopslag teruggezet en hervat.'
-            : 'Lopende track hersteld en hervat als nieuw segment.'), 400);
+          setTimeout(() => toast('Lopende track hersteld en hervat als nieuw segment.'), 400);
         }
 
         render();
         setTimeout(() => { map.invalidateSize(); fitItems(); }, 120);
 
         try {
-          sessionStorage.removeItem(REFRESH_PENDING_KEY);
           const cleanUrl = new URL(location.href);
           if (cleanUrl.searchParams.has(REFRESH_QUERY_KEY)) {
             cleanUrl.searchParams.delete(REFRESH_QUERY_KEY);
