@@ -2387,6 +2387,32 @@ exports.OpenLocationCode = OpenLocationCode;
           searchPasses: 3
         },
 
+        /* --- GPX-export ------------------------------------------------
+         * Eén bestand per kalenderdag. De dag is een lokale notie (een rit
+         * van 23:30 tot 00:30 hoort bij twee dagen), terwijl de tijden in
+         * het bestand volgens de GPX-standaard in UTC staan.
+         * -------------------------------------------------------------- */
+        gpx: {
+          fileNamePattern: '{date}_waypointtracker.gpx',
+          creator: 'Local Waypoints',
+          namespace: 'https://xtophe.com/local-waypoints/1',
+          namespacePrefix: 'lw',
+          zipName: 'waypointtracker-gpx-{date}.zip',
+          // Punten van een track die over middernacht loopt worden over de
+          // dagbestanden verdeeld in plaats van in één bestand geduwd.
+          splitTracksAtMidnight: true,
+          decimals: 7,
+          symbols: {
+            horeca: 'Restaurant',
+            tankstation: 'Gas Station',
+            parkeren: 'Parking Area',
+            'kort verblijf': 'Flag, Blue',
+            'lang verblijf': 'Lodging',
+            'korte pauze': 'Flag, Green',
+            gebeurtenis: 'Pin, Blue'
+          }
+        },
+
         /* --- geocoding ------------------------------------------------ */
         geocoding: {
           timeoutMs: 10000,
@@ -5469,17 +5495,36 @@ exports.OpenLocationCode = OpenLocationCode;
         return found ? String(found.textContent || '').trim() : '';
       }
 
+      // Eigen extensies teruglezen, zodat een eigen GPX verliesvrij terugkomt.
+      function lwValue(node, name) {
+        const direct = node.getElementsByTagNameNS(CONFIG.gpx.namespace, name)[0];
+        if (direct) return String(direct.textContent || '').trim();
+        const prefixed = node.getElementsByTagName(`${CONFIG.gpx.namespacePrefix}:${name}`)[0];
+        return prefixed ? String(prefixed.textContent || '').trim() : '';
+      }
+
+      function lwNodes(node, name) {
+        const direct = node.getElementsByTagNameNS(CONFIG.gpx.namespace, name);
+        return direct.length ? [...direct] : [...node.getElementsByTagName(`${CONFIG.gpx.namespacePrefix}:${name}`)];
+      }
+
       function gpxPoint(node) {
         const lat = Number(node.getAttribute('lat'));
         const lng = Number(node.getAttribute('lon'));
         if (!validCoords(lat, lng)) return null;
         const time = gpxText(node, 'time');
         const elevation = gpxText(node, 'ele');
+        const accuracy = lwValue(node, 'accuracy');
+        const speed = lwValue(node, 'speed');
+        const profile = lwValue(node, 'profile');
         return {
           lat, lng,
           time: time || new Date().toISOString(),
           altitude: elevation ? Number(elevation) : null,
-          accuracy: null, speed: null, heading: null,
+          accuracy: accuracy ? Number(accuracy) : null,
+          speed: speed ? Number(speed) : null,
+          heading: null,
+          ...(profile ? { profile } : {}),
           breakBefore: false
         };
       }
@@ -5499,16 +5544,24 @@ exports.OpenLocationCode = OpenLocationCode;
           const point = gpxPoint(node);
           if (!point) continue;
           const when = localDateTimeValue(new Date(point.time));
+          // Bezoeken uit onze eigen extensie hebben voorrang op het ene <time>.
+          const visits = lwNodes(node, 'visit').map(visit => ({
+            startAt: visit.getAttribute('start') ? localDateTimeValue(new Date(visit.getAttribute('start'))) : '',
+            endAt: visit.getAttribute('end') ? localDateTimeValue(new Date(visit.getAttribute('end'))) : ''
+          })).filter(visit => visit.startAt);
+          const address = lwValue(node, 'address') || gpxText(node, 'cmt');
           raw.push({
+            id: lwValue(node, 'id') || undefined,
             type: 'waypoint',
             title: gpxText(node, 'name') || 'GPX-waypoint',
-            note: gpxText(node, 'desc') || gpxText(node, 'cmt') || '',
+            note: gpxText(node, 'desc') || (address ? '' : gpxText(node, 'cmt')) || '',
             category: (gpxText(node, 'type') || gpxText(node, 'sym') || '').toLowerCase(),
-            group: groupName,
+            group: lwValue(node, 'group') || groupName,
             lat: point.lat, lng: point.lng,
-            occasions: [{ startAt: when, endAt: '' }],
-            startAt: when, endAt: '',
-            address: ''
+            occasions: visits.length ? visits : [{ startAt: when, endAt: '' }],
+            startAt: visits[0]?.startAt || when,
+            endAt: visits.at(-1)?.endAt || '',
+            address
           });
         }
 
@@ -5536,11 +5589,14 @@ exports.OpenLocationCode = OpenLocationCode;
           }
           if (!points.length) continue;
           raw.push({
+            // Bij een track die over middernacht liep, houdt elk dagdeel een
+            // eigen id, anders zou het tweede deel het eerste overschrijven.
+            id: lwNodes(node, 'part').length ? undefined : (lwValue(node, 'id') || undefined),
             type: 'track',
             title: gpxText(node, 'name') || groupName || 'GPX-track',
             note: gpxText(node, 'desc') || gpxText(node, 'cmt') || '',
-            category: '',
-            group: groupName,
+            category: gpxText(node, 'type') || '',
+            group: lwValue(node, 'group') || groupName,
             points,
             startAt: localDateTimeValue(new Date(points[0].time)),
             endAt: localDateTimeValue(new Date(points.at(-1).time))
@@ -5625,7 +5681,282 @@ exports.OpenLocationCode = OpenLocationCode;
       els.importBtn.addEventListener('click', () => els.importInput.click());
       els.importInput.addEventListener('change', () => void importJsonFile(els.importInput.files?.[0]));
 
-      els.exportBtn.addEventListener('click', () => {
+      /* ------------------------------------------------------------------ *
+       * GPX-export: één bestand per kalenderdag
+       *
+       * Een dag bevat de bezoeken die op die dag vallen en de trackpunten van
+       * die dag. Wat GPX zelf kent (name, desc, cmt, type, time, ele) gaat in
+       * de standaardvelden, zodat elke kaart-app het leest; alles daarbuiten
+       * (groep, categorie, adres, meerdere bezoeken, snelheidsprofiel) staat
+       * in extensions onder een eigen namespace, zodat een terug-import niets
+       * verliest.
+       * ------------------------------------------------------------------ */
+      const xmlEscape = (value = '') => String(value).replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;'
+      }[ch]));
+
+      // De dagsleutel is lokaal; de tijden in het bestand blijven UTC.
+      function localDayKey(value) {
+        const date = value instanceof Date ? value : new Date(value);
+        if (Number.isNaN(date.getTime())) return '';
+        const pad = n => String(n).padStart(2, '0');
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+      }
+
+      const isoTime = (value) => {
+        const date = value instanceof Date ? value : new Date(value);
+        return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+      };
+
+      /**
+       * Verdeelt alles over kalenderdagen.
+       * Een waypoint verschijnt op elke dag waarop het bezocht is, met alleen
+       * de bezoeken van die dag. Een track wordt op middernacht gesplitst,
+       * waarbij de bestaande segmentgrenzen behouden blijven.
+       */
+      function groupByDay(list) {
+        const days = new Map();
+        const dayOf = (key) => {
+          if (!days.has(key)) days.set(key, { key, waypoints: [], tracks: [] });
+          return days.get(key);
+        };
+
+        for (const item of list) {
+          if (isTrack(item)) {
+            const points = (item.points || []).filter(point => validCoords(Number(point.lat), Number(point.lng)));
+            if (!points.length) continue;
+
+            if (!CONFIG.gpx.splitTracksAtMidnight) {
+              dayOf(localDayKey(item.startAt || points[0].time)).tracks.push({ item, points });
+              continue;
+            }
+            const perDay = new Map();
+            for (const point of points) {
+              const key = localDayKey(point.time);
+              if (!perDay.has(key)) perDay.set(key, []);
+              perDay.get(key).push(point);
+            }
+            const parts = [...perDay.entries()];
+            parts.forEach(([key, dayPoints], index) => {
+              dayOf(key).tracks.push({
+                item, points: dayPoints,
+                part: parts.length > 1 ? { index: index + 1, total: parts.length } : null
+              });
+            });
+            continue;
+          }
+
+          if (!validCoords(Number(item.lat), Number(item.lng))) continue;
+          const perDay = new Map();
+          for (const occasion of sortOccasions(itemOccasions(item))) {
+            const key = localDayKey(occasion.startAt);
+            if (!key) continue;
+            if (!perDay.has(key)) perDay.set(key, []);
+            perDay.get(key).push(occasion);
+          }
+          if (!perDay.size) perDay.set(localDayKey(item.createdAt || Date.now()), []);
+          for (const [key, visits] of perDay) dayOf(key).waypoints.push({ item, visits });
+        }
+
+        return [...days.values()].sort((a, b) => a.key.localeCompare(b.key));
+      }
+
+      function gpxBounds(day) {
+        const coords = [];
+        for (const entry of day.waypoints) coords.push([Number(entry.item.lat), Number(entry.item.lng)]);
+        for (const entry of day.tracks) for (const point of entry.points) coords.push([Number(point.lat), Number(point.lng)]);
+        if (!coords.length) return '';
+        const lats = coords.map(c => c[0]);
+        const lngs = coords.map(c => c[1]);
+        return `<bounds minlat="${Math.min(...lats)}" minlon="${Math.min(...lngs)}"` +
+          ` maxlat="${Math.max(...lats)}" maxlon="${Math.max(...lngs)}" />`;
+      }
+
+      function gpxForDay(day) {
+        const ns = CONFIG.gpx.namespacePrefix;
+        const fixed = (value) => Number(value).toFixed(CONFIG.gpx.decimals);
+        const tag = (name, value) => (value === '' || value == null ? '' : `<${name}>${xmlEscape(value)}</${name}>`);
+
+        let distance = 0;
+        for (const entry of day.tracks) {
+          for (let i = 1; i < entry.points.length; i++) {
+            if (!entry.points[i].breakBefore) distance += distanceMetres(entry.points[i - 1], entry.points[i]);
+          }
+        }
+        const groups = [...new Set([...day.waypoints, ...day.tracks]
+          .map(entry => itemGroup(entry.item)).filter(Boolean))];
+        const summary = [
+          `${day.waypoints.length} waypoint${day.waypoints.length === 1 ? '' : 's'}`,
+          `${day.tracks.length} track${day.tracks.length === 1 ? '' : 's'}`,
+          distance ? formatDistance(distance) : ''
+        ].filter(Boolean).join(', ');
+
+        const waypoints = day.waypoints.map(({ item, visits }) => {
+          const first = visits[0];
+          const symbol = CONFIG.gpx.symbols[String(item.category || '').toLowerCase()];
+          return `  <wpt lat="${fixed(item.lat)}" lon="${fixed(item.lng)}">
+${first?.startAt ? `    <time>${isoTime(first.startAt)}</time>\n` : ''}    ${tag('name', item.title)}
+    ${tag('desc', item.note)}
+    ${tag('cmt', item.address)}
+    ${tag('type', item.category)}
+    ${symbol ? tag('sym', symbol) : ''}
+    <extensions>
+      ${tag(ns + ':id', item.id)}
+      ${tag(ns + ':group', itemGroup(item))}
+      ${tag(ns + ':address', item.address)}
+${visits.map(visit => `      <${ns}:visit start="${xmlEscape(isoTime(visit.startAt))}"${visit.endAt ? ` end="${xmlEscape(isoTime(visit.endAt))}"` : ''} />`).join('\n')}
+    </extensions>
+  </wpt>`;
+        }).join('\n');
+
+        const tracks = day.tracks.map(({ item, points, part }) => {
+          const segments = [];
+          let current = [];
+          points.forEach((point, index) => {
+            if (index > 0 && point.breakBefore) { segments.push(current); current = []; }
+            current.push(point);
+          });
+          if (current.length) segments.push(current);
+
+          const body = segments.map(segment => `    <trkseg>
+${segment.map(point => `      <trkpt lat="${fixed(point.lat)}" lon="${fixed(point.lng)}">` +
+  (point.altitude == null ? '' : `<ele>${Number(point.altitude).toFixed(2)}</ele>`) +
+  (point.time ? `<time>${isoTime(point.time)}</time>` : '') +
+  ((point.accuracy != null || point.speed != null || point.profile)
+    ? `<extensions>` +
+      (point.accuracy == null ? '' : `<${ns}:accuracy>${Number(point.accuracy).toFixed(1)}</${ns}:accuracy>`) +
+      (point.speed == null ? '' : `<${ns}:speed>${Number(point.speed).toFixed(2)}</${ns}:speed>`) +
+      (point.profile ? `<${ns}:profile>${xmlEscape(point.profile)}</${ns}:profile>` : '') +
+      `</extensions>`
+    : '') +
+  `</trkpt>`).join('\n')}
+    </trkseg>`).join('\n');
+
+          const name = part ? `${item.title} (${part.index}/${part.total})` : item.title;
+          return `  <trk>
+    ${tag('name', name)}
+    ${tag('desc', item.note)}
+    ${tag('type', item.category)}
+    <extensions>
+      ${tag(ns + ':id', item.id)}
+      ${tag(ns + ':group', itemGroup(item))}
+      ${part ? `<${ns}:part index="${part.index}" total="${part.total}" />` : ''}
+    </extensions>
+${body}
+  </trk>`;
+        }).join('\n');
+
+        return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="${xmlEscape(CONFIG.gpx.creator)}"
+     xmlns="http://www.topografix.com/GPX/1/1"
+     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xmlns:${ns}="${xmlEscape(CONFIG.gpx.namespace)}"
+     xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd">
+  <metadata>
+    ${tag('name', `${day.key}${groups.length ? ' — ' + groups.join(', ') : ''}`)}
+    ${tag('desc', summary)}
+    <time>${new Date().toISOString()}</time>
+    ${groups.length ? tag('keywords', groups.join(', ')) : ''}
+    ${gpxBounds(day)}
+    <extensions>
+      <${ns}:day>${day.key}</${ns}:day>
+      <${ns}:waypoints>${day.waypoints.length}</${ns}:waypoints>
+      <${ns}:tracks>${day.tracks.length}</${ns}:tracks>
+      ${distance ? `<${ns}:distance unit="m">${Math.round(distance)}</${ns}:distance>` : ''}
+    </extensions>
+  </metadata>
+${waypoints}
+${tracks}
+</gpx>
+`.replace(/^\s*\n/gm, '');
+      }
+
+      /* --- minimale ZIP (opgeslagen, niet gecomprimeerd) ------------------ *
+       * Genoeg om meerdere dagbestanden als één download aan te bieden waar
+       * het delen van meerdere bestanden niet werkt; scheelt een bibliotheek.
+       * ------------------------------------------------------------------ */
+      const CRC_TABLE = (() => {
+        const table = new Uint32Array(256);
+        for (let i = 0; i < 256; i++) {
+          let c = i;
+          for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+          table[i] = c >>> 0;
+        }
+        return table;
+      })();
+
+      function crc32(bytes) {
+        let crc = 0xFFFFFFFF;
+        for (const byte of bytes) crc = CRC_TABLE[(crc ^ byte) & 0xFF] ^ (crc >>> 8);
+        return (crc ^ 0xFFFFFFFF) >>> 0;
+      }
+
+      function zipStore(files) {
+        const encoder = new TextEncoder();
+        const chunks = [];
+        const central = [];
+        let offset = 0;
+        const u16 = (v) => [v & 0xFF, (v >>> 8) & 0xFF];
+        const u32 = (v) => [v & 0xFF, (v >>> 8) & 0xFF, (v >>> 16) & 0xFF, (v >>> 24) & 0xFF];
+
+        for (const file of files) {
+          const name = encoder.encode(file.name);
+          const data = encoder.encode(file.text);
+          const crc = crc32(data);
+          const local = [...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0),
+            ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), ...u16(0)];
+          chunks.push(new Uint8Array(local), name, data);
+          central.push([...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0),
+            ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length),
+            ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(offset)], name);
+          offset += local.length + name.length + data.length;
+        }
+
+        const directory = [];
+        let directorySize = 0;
+        for (const [header, name] of central) {
+          directory.push(new Uint8Array(header), name);
+          directorySize += header.length + name.length;
+        }
+        const end = new Uint8Array([...u32(0x06054b50), ...u16(0), ...u16(0),
+          ...u16(files.length), ...u16(files.length), ...u32(directorySize), ...u32(offset), ...u16(0)]);
+        return new Blob([...chunks, ...directory, end], { type: 'application/zip' });
+      }
+
+      function buildGpxFiles() {
+        const all = activeTrack ? [...items, activeTrack] : items;
+        return groupByDay(all).map(day => ({
+          name: CONFIG.gpx.fileNamePattern.replace('{date}', day.key),
+          text: gpxForDay(day),
+          day: day.key
+        }));
+      }
+
+      async function exportGpxPerDay() {
+        const files = buildGpxFiles();
+        if (!files.length) { toast('Er is nog niets om te exporteren.'); return; }
+
+        const blobs = files.map(file => new File([file.text], file.name, { type: 'application/gpx+xml' }));
+        // Meerdere bestanden tegelijk delen werkt op iOS; dat is hier de
+        // prettigste route naar Bestanden, AirDrop of mail.
+        if (navigator.canShare?.({ files: blobs })) {
+          try {
+            await navigator.share({ files: blobs, title: `GPX per dag (${files.length})` });
+            return;
+          } catch (error) {
+            if (error?.name === 'AbortError') return;
+          }
+        }
+        if (files.length === 1) {
+          downloadBlob(blobs[0], files[0].name);
+          toast(`${files[0].name} geëxporteerd.`);
+          return;
+        }
+        downloadBlob(zipStore(files), CONFIG.gpx.zipName.replace('{date}', localDayKey(new Date())));
+        toast(`${files.length} dagbestanden in één zip geëxporteerd.`);
+      }
+
+      function exportJsonBackup() {
         const payload = {
           schema: 'local-waypoints-v8',
           exportedAt: new Date().toISOString(),
@@ -5634,15 +5965,21 @@ exports.OpenLocationCode = OpenLocationCode;
           activeTrack,
           items
         };
-        const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `waypoints-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        downloadBlob(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }),
+          `waypoints-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
         toast(`${items.length} item${items.length === 1 ? '' : 's'} geëxporteerd.`);
+      }
+
+      els.exportBtn.addEventListener('click', async () => {
+        const days = buildGpxFiles().length;
+        const choice = await chooseAction('Exporteren', 'JSON is de volledige back-up; GPX is voor andere kaart-apps.', [
+          { label: 'JSON — volledige back-up', detail: 'Alles in één bestand, kan hier weer ingelezen worden', value: 'json', primary: true },
+          { label: 'GPX per dag', detail: days
+              ? `${days} dagbestand${days === 1 ? '' : 'en'} met tracks, waypoints en metadata`
+              : 'Nog niets om te exporteren', value: 'gpx' }
+        ]);
+        if (choice === 'json') exportJsonBackup();
+        else if (choice === 'gpx') await exportGpxPerDay();
       });
 
       /* ------------------------------------------------------------------ *
