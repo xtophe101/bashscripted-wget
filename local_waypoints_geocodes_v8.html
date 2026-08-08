@@ -5450,7 +5450,9 @@ exports.OpenLocationCode = OpenLocationCode;
             events: Array.isArray(raw.events) ? raw.events : [],
             pendingGap: false,
             createdAt: raw.createdAt ? String(raw.createdAt) : new Date().toISOString(),
-            updatedAt: raw.updatedAt ? String(raw.updatedAt) : new Date().toISOString()
+            // Geen updatedAt in de bron betekent onbekend, niet zojuist gewijzigd:
+            // anders zou zo'n item bij samenvoegen altijd van een lokale versie winnen.
+            updatedAt: raw.updatedAt ? String(raw.updatedAt) : (raw.createdAt ? String(raw.createdAt) : new Date().toISOString())
           };
         }
 
@@ -5479,7 +5481,9 @@ exports.OpenLocationCode = OpenLocationCode;
           lat, lng,
           address: String(raw.address || ''),
           createdAt: raw.createdAt ? String(raw.createdAt) : new Date().toISOString(),
-          updatedAt: raw.updatedAt ? String(raw.updatedAt) : new Date().toISOString()
+          // Geen updatedAt in de bron betekent onbekend, niet zojuist gewijzigd:
+          // anders zou zo'n item bij samenvoegen altijd van een lokale versie winnen.
+          updatedAt: raw.updatedAt ? String(raw.updatedAt) : (raw.createdAt ? String(raw.createdAt) : new Date().toISOString())
         };
       }
 
@@ -5610,6 +5614,21 @@ exports.OpenLocationCode = OpenLocationCode;
       const isGpxFile = (file, text) =>
         /\.gpx$/i.test(file.name || '') || /^\s*(<\?xml[^>]*\?>\s*)?<gpx[\s>]/i.test(text);
 
+      /**
+       * Wie wint bij hetzelfde item uit twee toestellen? De jongste wijziging.
+       * Een ontbrekend tijdstempel telt als onbekend en verliest daarom van een
+       * versie die er wel een heeft; zijn beide onbekend, dan wint de import,
+       * want daar koos de gebruiker net voor.
+       */
+      function newerWins(incoming, existing) {
+        const stamp = (item) => Date.parse(item?.updatedAt || item?.createdAt || '');
+        const a = stamp(incoming);
+        const b = stamp(existing);
+        if (!Number.isFinite(a)) return !Number.isFinite(b);
+        if (!Number.isFinite(b)) return true;
+        return a >= b;
+      }
+
       async function importJsonFile(file) {
         if (!file) return;
         try {
@@ -5635,7 +5654,8 @@ exports.OpenLocationCode = OpenLocationCode;
 
           const merge = confirm(
             `${imported.length} item${imported.length === 1 ? '' : 's'} gevonden.\n\n` +
-            `OK = SAMENVOEGEN met je huidige ${items.length} item${items.length === 1 ? '' : 's'} (niets gaat verloren).\n` +
+            `OK = SAMENVOEGEN met je huidige ${items.length} item${items.length === 1 ? '' : 's'} ` +
+            '(bij hetzelfde item wint de nieuwste versie).\n' +
             'Annuleren = de huidige lijst VERVANGEN.'
           );
 
@@ -5643,17 +5663,34 @@ exports.OpenLocationCode = OpenLocationCode;
 
           if (merge) {
             const byId = new Map(items.map(item => [String(item.id), item]));
+            const applied = [];
             let added = 0;
             let updated = 0;
+            let kept = 0;
             for (const item of imported) {
-              if (byId.has(String(item.id))) updated++; else added++;
+              const existing = byId.get(String(item.id));
+              if (!existing) {
+                added++;
+              } else if (newerWins(item, existing)) {
+                updated++;
+              } else {
+                // Dit toestel heeft een jongere versie; die blijft staan.
+                kept++;
+                continue;
+              }
               byId.set(String(item.id), item);
+              applied.push(item);
             }
             items = [...byId.values()];
-            await persistMany(imported);
+            // Alleen wegschrijven wat ook echt is overgenomen.
+            await persistMany(applied);
             render();
             fitItems();
-            toast(`${added} toegevoegd, ${updated} bijgewerkt.`);
+            offerUndo([
+              `${added} toegevoegd`,
+              `${updated} bijgewerkt`,
+              kept ? `${kept} behouden (hier nieuwer)` : ''
+            ].filter(Boolean).join(', ') + '.', before);
             return;
           }
 
